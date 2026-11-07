@@ -140,11 +140,10 @@ class SdRecordingList(NamedTuple):
     end_ts: float
 
 
-#: Reply command ids, so a caller that knows which question it asked can say so.
+#: Short names for the listing's command ids, for sd_listing and the
+#: sd_event_probe script; this module uses the IOTYPE_* names.
 LISTEVENT_RESP_CMD = IOTYPE_USER_IPCAM_LISTEVENT_RESP
 HASLISTEVENT_RESP_CMD = IOTYPE_USER_IPCAM_HASLISTEVENT_RESP
-
-#: Request command ids (the table in constants.py).
 HASLISTEVENT_REQ_CMD = IOTYPE_USER_IPCAM_HASLISTEVENT_REQ
 LISTEVENT_REQ_CMD = IOTYPE_USER_IPCAM_LISTEVENT_REQ
 
@@ -237,9 +236,9 @@ def _consistent(count: int, body_len: int, command: Optional[int]) -> bool:
     accepted - reporting False for a well-formed page just because the decoder
     was not told what it was reading would be the check lying about the data.
     """
-    if command == HASLISTEVENT_RESP_CMD:
+    if command == IOTYPE_USER_IPCAM_HASLISTEVENT_RESP:
         return count == body_len
-    if command == LISTEVENT_RESP_CMD:
+    if command == IOTYPE_USER_IPCAM_LISTEVENT_RESP:
         return count * EVENT_RECORD_LEN == body_len
     return count == body_len or count * EVENT_RECORD_LEN == body_len
 
@@ -275,7 +274,7 @@ def decode_list_event_response(
     # gets nothing rather than fiction; a caller that passes no command still
     # gets the old best-effort behaviour, because that is what the existing
     # tests and probe runs read.
-    if command == HASLISTEVENT_RESP_CMD:
+    if command == IOTYPE_USER_IPCAM_HASLISTEVENT_RESP:
         return None
     if payload is None or len(payload) < _HEADER_LEN:
         return None
@@ -326,7 +325,7 @@ def decode_hour_map(
     None means "this is not a map", which is a different answer from an empty
     map and is why the return is not simply ``b""``.
     """
-    if command == LISTEVENT_RESP_CMD:
+    if command == IOTYPE_USER_IPCAM_LISTEVENT_RESP:
         return None
     if payload is None or len(payload) <= _HEADER_LEN:
         return None

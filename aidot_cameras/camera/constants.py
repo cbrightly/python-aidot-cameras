@@ -204,10 +204,9 @@ _PTZ_DIR_CODES: dict = {
 # here: it is outside AVIOCTRL_QUALITY, and measured 2026-08-07 it behaves like
 # every other value - acked, and the encode unchanged in that session and the
 # next.  Adding it would offer a control that does nothing.  The two arms below
-# are the ones with enum names, kept for parity with the command the app sends.  Sent as SETSTREAMCTRL (cmd 800) over the active session,
+# are the ones with enum names, kept for parity with the command the app sends.
+# Sent as IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ (800) over the active session,
 # payload <IB3x> = channel(0) + quality byte (SMsgAVIoctrlSetStreamCtrlReq).
-SETSTREAMCTRL_CMD = IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ
-GETSTREAMCTRL_CMD = IOTYPE_USER_IPCAM_GETSTREAMCTRL_REQ
 _STREAM_QUALITY: dict = {"hd": 1, "sd": 5}  # AVIOCTRL_QUALITY_MAX / _MIDDLE
 
 

@@ -39,8 +39,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from aidot_cameras.camera import controls as controls_mod
-from aidot_cameras.camera.constants import _STREAM_QUALITY, SETSTREAMCTRL_CMD
-from aidot_cameras.camera.controls import SETSTREAMCTRL_RESP_CMD, _CameraControlsMixin
+from aidot_cameras.camera.constants import (
+    _STREAM_QUALITY,
+    IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ as SETSTREAMCTRL_CMD,
+    IOTYPE_USER_IPCAM_SETSTREAMCTRL_RESP as SETSTREAMCTRL_RESP_CMD,
+)
+from aidot_cameras.camera.controls import _CameraControlsMixin
 from aidot_cameras.camera.protocol import parse_avio_response
 from aidot_cameras.camera.webrtc import WebRTCSession
 
