@@ -5320,12 +5320,12 @@ class CameraMixin(
     async def _reap_stream_drain(self):
         """Stop and reap the persistent-MQTT stream drain task, if any.
 
-        The drain blocks an executor thread on ``outgoing_q.get`` until a ``None``
-        sentinel arrives. A normal stop pushes that sentinel from the
+        The drain awaits ``outgoing_q`` on the loop until a ``None`` sentinel
+        arrives. A normal stop pushes that sentinel from the
         WebRTCSession/SdesSession; but if no session took ownership (open
-        cancelled mid-handshake) or a new open replaced this one, we must push it
-        ourselves - cancelling the future alone cannot interrupt the blocked
-        thread, leaking it (and its handler on the shared connection) forever."""
+        cancelled mid-handshake) or a new open replaced this one, nothing would,
+        and the drain and its handler on the shared connection would stay
+        forever. So push the sentinel and cancel the drain here."""
         drain = getattr(self, "_stream_mqtt_drain", None)
         outq = getattr(self, "_stream_mqtt_outq", None)
         self._stream_mqtt_drain = None
