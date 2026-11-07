@@ -196,14 +196,13 @@ def test_the_dtls_phase_open_hands_the_request_to_the_sdes_open():
         assert any(k.arg == "sd_playback" for k in call.keywords), call.lineno
 
 
-def test_the_dtls_fallback_carries_the_request_so_dtls_can_refuse_it():
-    calls = calls_to(
+def test_an_sdes_playback_is_never_reopened_over_dtls():
+    # The SDES-to-DTLS fallback, which re-entered the DTLS open carrying the
+    # request, is gone (the vendor app has none); nothing re-enters it now.
+    assert not calls_to(
         module_tree("aidot_cameras.camera.webrtc_open"),
         "_async_open_webrtc_stream_impl",
     )
-    assert calls, "the SDES-to-DTLS fallback no longer re-enters the impl"
-    for call in calls:
-        assert any(k.arg == "_sd_playback" for k in call.keywords), call.lineno
 
 
 def test_the_dtls_open_refuses_playback_without_a_ts_file():

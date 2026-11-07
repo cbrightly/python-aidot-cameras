@@ -96,17 +96,18 @@ don't have to be re-discovered):
   via ICE; treat these as transient and proceed rather than aborting. A camera
   already at its viewer limit returns a terminal ack (`-50002` / `-50015`) -
   see the busy handling below.
-- **SDES role-reversal (A001064 PTZ):** this model echoes our offer back as its
-  own `webrtcReq` *before* doing ICE, so it must be armed before our `webrtcReq`
-  is sent. The `sdes_fast_liveplay` optimisation sends `webrtcReq` ~4.5 s earlier
-  and breaks this model specifically, so A001064 is excluded from that flag
-  (`_NO_FAST_LIVEPLAY_MODELS`).
+- **A001064 PTZ keeps the livePlay waits:** it must be armed before our
+  `webrtcReq` is sent. The `sdes_fast_liveplay` optimisation sends `webrtcReq`
+  ~4.5 s earlier and dropped this model's media in a live A/B, so A001064 is
+  excluded from that flag (`_NO_FAST_LIVEPLAY_MODELS`). It was once thought to
+  echo our offer back and need a `webrtcResp` from us; that was never seen in
+  the field, the official app sends none, and the library no longer does.
 
 The `livePlayResp` wait returns as soon as the response arrives; its timeout is
 only paid when the camera never answers. `sdes_fast_liveplay`
 (`AIDOT_SDES_FAST_LIVEPLAY` env / `sdes_fast_liveplay=` kwarg) skips this wait and
 goes straight to webrtcReq/ICE - **on by default**, matching the official app
-(which never waits for `livePlayResp`). Role-reversal models (A001064) are always
+(which never waits for `livePlayResp`). A001064 is always
 excluded. Disable with `AIDOT_SDES_FAST_LIVEPLAY` in `{0,false,no,off}`.
 
 ### Battery cameras and the first open
@@ -133,11 +134,12 @@ opening a session until the device reports itself awake.
 - **A stalled attempt is abandoned to the retry.**
   `AIDOT_BATTERY_STALE_OFFER_GRACE_S` (15 s, `0` disables) ends the first-media
   wait early when the camera turned up mid-wait and still sent nothing, rather
-  than holding the full 75 s. `AIDOT_SDES_ANSWER_PROBE_GRACE_S` and
-  `AIDOT_SDES_TRIGGER_GRACE_S` (20 s each, 1.0.0rc45) cover two further SDES
-  shapes - the camera answered and never sent a STUN probe, or LIVING went out
-  on a path it answered and neither an ack nor media followed - both timed from
-  the answer, never the open, so a camera still waking is not clipped. See
+  than holding the full 75 s. `AIDOT_SDES_NO_MEDIA_GRACE_S` (20 s) is the
+  other timer: no media 20 s after the camera's answer ends the attempt,
+  whatever the shape - the camera never sent a STUN probe, nothing answered the
+  candidate we nominated, or LIVING went out and neither an ack nor media
+  followed. It is timed from the answer, never the open, so a camera still
+  waking is not clipped, and the stall WARNING names the shape. See
   [`ENVIRONMENT.md`](ENVIRONMENT.md) for the exact conditions.
 
 None of this wakes a camera that nobody is watching. Snapshots for a dashboard
@@ -466,8 +468,8 @@ its previous behaviour, which is every relay-path battery camera measured.
 The **`webrtcReq`-echo wait** was a flat 2.0 s for role-reversal models. Across
 18 h of one deployment, of 61 SDES opens the 17 that took the wait timed out 17
 times out of 17, and the `webrtcResp` it exists to build was never sent once.
-See `AIDOT_SDES_ECHO_WAIT_S` in [`ENVIRONMENT.md`](ENVIRONMENT.md) for how it is sized now and what
-happens on a fleet whose echo band is not empty.
+It was cut to 0.25 s, and is now gone along with the `webrtcResp` itself: the
+official app never sends one on SDES.
 
 Battery models take neither wait; their cold open is dominated by the camera
 waking, and is unchanged.
@@ -669,9 +671,7 @@ would discard unrouted - are taken raw at its RTP router (`RtpRouter.raw_tap`
 in the vendored aiortc), assembled into access units and recorded as HEVC.
 The recorder's video codec is set by the recording's first keyframe, so an
 H264 recording (camera encoder setting 2) is recorded as H264 from aiortc's
-own track. There is no `on_frame` decode and no serve on this path. A camera
-flagged SDES that answers only DTLS falls back to this path, still asking for
-the recording (1.0.0rc64). A frame that lost a packet the camera did not resend
+own track. There is no `on_frame` decode and no serve on this path. A frame that lost a packet the camera did not resend
 is handed on with what arrived, for the decoder to conceal, rather than
 dropped (1.0.0rc66; `H265AccessUnits(keep_damaged=False)` drops it). On an
 A000088 the answer's extra video section names H265 on PT 0. Played on a

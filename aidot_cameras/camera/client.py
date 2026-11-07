@@ -2883,12 +2883,13 @@ class CameraMixin(
     # data-channel-less; it's parked on the SDES/TUTK side anyway.
     _NO_DATACHANNEL_MODELS: frozenset = frozenset({"LK.IPC.A001064"})
 
-    # A001064's role-reversal handshake (the camera echoes our offer back as its
-    # own webrtcReq before doing ICE, and won't stream until it gets our
-    # webrtcResp) needs the camera armed BEFORE our webrtcReq.  sdes_fast_liveplay
+    # A001064 needs the camera armed BEFORE our webrtcReq.  sdes_fast_liveplay
     # sends webrtcReq ~4.5 s earlier, which degrades A001064 media reliability
     # (2/2 -> 1/2 media in a live A/B; the flag was soak-validated only on the
-    # A001513 battery cameras).  Exclude role-reversal models from the flag.
+    # A001513 battery cameras), so these models keep the full livePlay waits.
+    # (This set was first read as "role-reversal" models that need a
+    # webrtcResp built from an echo of our offer; that path was never taken in
+    # the field and is gone, but the A/B above stands on its own.)
     _NO_FAST_LIVEPLAY_MODELS: frozenset = frozenset({"LK.IPC.A001064"})
 
     # Models confirmed (2026-05-02) to send TUTK-framed data instead of standard
@@ -6775,10 +6776,10 @@ class CameraMixin(
         ``AIDOT_SDES_FAST_LIVEPLAY`` in {0,false,no,off} or per-camera
         ``_sdes_fast_liveplay_opt=False`` (the explicit opt always wins).
 
-        Role-reversal models (``_NO_FAST_LIVEPLAY_MODELS``, e.g. A001064) are ALWAYS
-        excluded regardless of the flag - their handshake needs the camera armed
-        before our webrtcReq, so the early webrtcReq degrades their media (a
-        correctness exclusion, not a default choice). Only consulted for SDES
+        ``_NO_FAST_LIVEPLAY_MODELS`` (e.g. A001064) are ALWAYS excluded
+        regardless of the flag - they need the camera armed before our
+        webrtcReq, so the early webrtcReq degrades their media (a correctness
+        exclusion, not a default choice). Only consulted for SDES
         cameras (the caller gates on is_sdes_camera)."""
         model = getattr(getattr(self, "info", None), "model_id", None)
         if model in self._NO_FAST_LIVEPLAY_MODELS:
@@ -7619,17 +7620,3 @@ class CameraMixin(
                             exc_info=True,
                         )
                 raise
-
-    # ------------------------------------------------------------------ #
-    # SDES-SRTP streaming path (cameras with isDTLS == '0')
-    # ------------------------------------------------------------------ #
-
-    class _SdesNoAnswerError(Exception):
-        """Raised by _open_sdes_stream when no webrtcResp arrives and
-        DTLS fallback is permitted (isDTLS != '0').
-
-        Signals async_open_webrtc_stream to retry with the DTLS path for
-        cameras that report ``enableSdes: '1'`` but actually require DTLS.
-        Cameras with ``isDTLS: '0'`` are excluded from this path; they
-        instead continue with ffmpeg and collect the SRTP stream directly.
-        """

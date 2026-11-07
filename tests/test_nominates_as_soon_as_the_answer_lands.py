@@ -146,10 +146,10 @@ def _sdes_open_calls(name):
 
 
 def test_the_window_loop_consults_the_exit_helper():
-    """A pure predicate is easy to write, test green, and never wire up. Both
-    STUN windows - the first and the 8 s retry window a quickConn camera
-    re-runs - consult it."""
-    assert len(_sdes_open_calls("_stun_window_answer_exit_due")) >= 2
+    """A pure predicate is easy to write, test green, and never wire up. The
+    STUN window consults it. (A second, quickConn retry window armed only by
+    the webrtcReq echo is gone with that echo.)"""
+    assert _sdes_open_calls("_stun_window_answer_exit_due")
 
 
 def test_the_nomination_reads_its_candidates_through_the_same_parser():
@@ -386,8 +386,8 @@ def test_no_marker_at_all_is_not_ready():
 
 
 def test_the_window_checks_the_marker_belongs_to_this_open():
-    """Both STUN windows check the marker is this open's, not just the first."""
-    assert len(_sdes_open_calls("_answer_ready_for_this_open")) >= 2
+    """The STUN window checks the marker is this open's."""
+    assert _sdes_open_calls("_answer_ready_for_this_open")
 
 
 # --------------------------------------------------------------------------- #

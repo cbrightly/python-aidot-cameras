@@ -331,17 +331,9 @@ KNOBS: "dict[str, Knob]" = _registry(
         reject_below=0.0,
         note="unset: 0.25 on either liveplay path",
     ),
-    Knob(
-        "AIDOT_SDES_ECHO_WAIT_S",
-        None,
-        "str",
-        note="sdes_open.py parses; unset means 0.25, or 2.0 once an echo was seen",
-    ),
     Knob("AIDOT_ABANDONED_MEDIA_GRACE_S", 8.0, "float", reject_below=0.0),
     Knob("AIDOT_BATTERY_STALE_OFFER_GRACE_S", 15.0, "float"),
-    Knob("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S", 20.0, "float"),
-    Knob("AIDOT_SDES_ANSWER_PROBE_GRACE_S", 20.0, "float"),
-    Knob("AIDOT_SDES_TRIGGER_GRACE_S", 20.0, "float"),
+    Knob("AIDOT_SDES_NO_MEDIA_GRACE_S", 20.0, "float"),
     Knob("AIDOT_PINNED_CODEC_RETRIES", 2, "int", reject_below=0),
     Knob(
         "AIDOT_SDES_SERVE_AUDIO",

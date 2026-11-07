@@ -296,8 +296,7 @@ class _CameraSdPlaybackMixin:
 def playback_peer_id(camera: Any, *, sdes: bool) -> str:
     """The peer id a playback open announces, for the SDES or DTLS transport.
 
-    The SDES-to-DTLS fallback builds a fresh one with ``sdes=False``: the
-    SDES id's transport digit is wrong for DTLS, and a live id (class 2,
+    The transport digit differs between the two, and a live id (class 2,
     PRE_LINK) would get audio alone from an H265-recording camera.
     """
     return camera.generate_webrtc_peer_id(
