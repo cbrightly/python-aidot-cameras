@@ -153,3 +153,4 @@ Deprecated now:
 | Name | Since | What happens |
 | --- | --- | --- |
 | `AIDOT_SDES_ECHO_WAIT_S`, `AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S`, `AIDOT_SDES_ANSWER_PROBE_GRACE_S`, `AIDOT_SDES_TRIGGER_GRACE_S` | [Unreleased] | accepted and ignored, with one warning per process when any is set; the SDES open has no `webrtcReq`-echo wait, and the three first-media rules are one timer, `AIDOT_SDES_NO_MEDIA_GRACE_S` (docs/ENVIRONMENT.md) |
+| `AIDOT_DTLS_SLOW_PROBE_THRESHOLD`, `AIDOT_DTLS_SLOW_PROBE_INTERVAL_S`, `AIDOT_DTLS_SLOW_PROBE_LOG_EVERY` | [Unreleased] | accepted and ignored, with one warning per process when any is set; the DTLS serve loop paces failed opens on one backoff, 15 s up to 600 s and 540-600 s at the cap (docs/ENVIRONMENT.md) |

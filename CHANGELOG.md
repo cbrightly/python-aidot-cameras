@@ -50,6 +50,30 @@ function each, all on default paths.
   INFO status lines for the three old shapes are unchanged. Measured
   2026-09-22 to 10-09, every one of 165 first medias arrived within 9.5 s of
   `webrtcReq`.
+- **The DTLS serve loop paces failed opens on one backoff.** Two mechanisms
+  did this before: a slow probe that widened the interval to 600 s after
+  five failures, and the offline pause the SDES and JPEG keepalives use. Now
+  one jittered backoff runs from 15 s up to a 600 s cap, and at the cap
+  every wait is between 540 and 600 s, so a camera that never opens is
+  probed no more often than before. An ICE failure keeps its
+  `AIDOT_BUSY_RETRY_S` (45 s) floor. A camera the cloud reports offline
+  waits the cap at once, ending early (not before the floor) when the cloud
+  reports it back. At the cap the WARNING drops to an INFO line every sixth
+  failure. Unchanged: a busy refusal still waits a flat
+  `AIDOT_BUSY_RETRY_S` without moving the backoff, and a cold encoder still
+  gets four quick 3 s retries first.
+- **One count decides when a DTLS camera's sessions are not worth
+  reopening.** A session fails when it ends within
+  `AIDOT_DTLS_SHORT_SESSION_S` (30 s) or is known to have delivered no
+  video; the rc71 wait after one (30 s, then 30-45 s) is unchanged, and a
+  session with no video canary and no watchdog verdict is still not counted.
+  After `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` (5) failures in a row the serve goes
+  dormant, as five video-less sessions already did. That is new for
+  sessions that keep dying short with video: they were reopened every
+  30-45 s for as long as the keepalive ran. A fresh live view reopens a
+  dormant camera; the count is kept on the camera, so one still failing goes
+  dormant again after one more failed session, and a session that lasts with
+  video starts the count again.
 
 ### Deprecated
 - **`AIDOT_PERSISTENT_MQTT`** is accepted and ignored; set to
@@ -59,6 +83,10 @@ function each, all on default paths.
   accepted and are ignored; one warning per process names any that are set.
   The echo wait is gone, and the three graces are replaced by
   `AIDOT_SDES_NO_MEDIA_GRACE_S`.
+- `AIDOT_DTLS_SLOW_PROBE_THRESHOLD`, `AIDOT_DTLS_SLOW_PROBE_INTERVAL_S` and
+  `AIDOT_DTLS_SLOW_PROBE_LOG_EVERY` are still accepted and are ignored; one
+  warning per process names any that are set. `AIDOT_DTLS_SLOW_PROBE_CHUNK_S`
+  stays, now for every long wait of the serve loop.
 
 ### Removed
 - Code nothing called: `protocol._mqtt_session`,

@@ -220,24 +220,30 @@ socket). The library forces `USE-CANDIDATE` onto the highest remote port, which
 lifts the per-attempt connect rate from ~25% to ~75-87%. The fix is **scoped to
 DTLS-camera connections only** - SDES cameras and non-camera devices are a strict
 no-op. Combined with the keepalive loop's retries (a jittered exponential
-backoff from 5 s to 300 s, with opens spaced at least `AIDOT_DTLS_RETRY_GATE_S`
+backoff from 15 s to 600 s, with opens spaced at least `AIDOT_DTLS_RETRY_GATE_S`
 apart) the effective connect rate is high. The fix is unconditional (it self-gates to
 A000088 DTLS connections, so it is a strict no-op everywhere else).
 
 Since 1.0.0rc71 a served DTLS session that ends on its own within
 `AIDOT_DTLS_SHORT_SESSION_S` (30 s) of opening, or never delivers video, is a
-short session and is paced on its own backoff (30 s, then 30-45 s), not
-reopened on the bare 15 s gate; and after an open whose ICE never connected
-(`AidotIceNotEstablished`) the next serve-loop open waits at least
+failed session and is paced on its own backoff (30 s, then 30-45 s), not
+reopened on the bare 15 s gate; after `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` (5) in a
+row the serve goes dormant until a fresh live view reopens it (the count is
+kept on the camera, so one still failing goes dormant again after one more
+failed session). Failed opens are paced on one backoff from 15 s up to 600 s,
+540-600 s at the cap; a camera the cloud reports offline waits the 600 s at
+once, ending early once it is back. A not-ready answer (encoder still cold)
+first gets four quick 3 s retries. After an open whose ICE never
+connected (`AidotIceNotEstablished`) the next serve-loop open waits at least
 `AIDOT_BUSY_RETRY_S` (45 s), since the camera still holds the session it
 accepted and refuses a sooner retry as busy. Hammering an A000088 like that is
 what can wedge its DTLS stack.
 
 If a camera is already serving its maximum number of viewers it returns a
 terminal ack (`-50002` / `-50015`); the open raises `AidotCameraBusy` rather
-than retrying at once. The DTLS serve loop then retries after
-`AIDOT_BUSY_RETRY_S` (45 s) and the SDES keepalive after `AIDOT_BUSY_BACKOFF_S`
-(20 s), so the camera can release the sessions it holds.
+than retrying at once. The DTLS serve loop then retries after a flat
+`AIDOT_BUSY_RETRY_S` (45 s) that leaves its backoff alone, and the SDES keepalive after
+`AIDOT_BUSY_BACKOFF_S` (20 s), so the camera can release the sessions it holds.
 
 ### The SDP handed to ffmpeg carries ONE codec
 
