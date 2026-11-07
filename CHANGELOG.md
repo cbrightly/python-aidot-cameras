@@ -38,6 +38,13 @@ function each, all on default paths.
   changes.
 
 ### Changed
+- **`AIDOT_MQTT_CONFIG2`: the fallback broker URL takes the plaintext gate.**
+  When getServerUrlConfig fails and the mqttConfig2 host is used instead, a
+  non-TLS URL is now refused unless `AIDOT_ALLOW_PLAINTEXT_MQTT` is set, and
+  logged, as the main path always did. getServerUrlConfig and the credential
+  fetch now run concurrently. The clientId, host and password that endpoint
+  issues are kept together in one runtime-only record, so its clientId is no
+  longer persisted; `mqttClientId` in stored login_info is userConfig's.
 - **Deprecated knobs warn from one place, one line per knob.** Each of the
   eight accepted-and-ignored variables now logs its own WARNING, once per
   process, naming what replaced it. `AIDOT_PERSISTENT_MQTT` warns when it is

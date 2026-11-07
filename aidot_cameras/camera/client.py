@@ -23,7 +23,7 @@ from ..exceptions import (
 )
 from ..const import APP_ID as _AIDOT_APP_ID
 from ..const import (
-    LOGIN_INFO_MQTT_CONFIG2_HOST_KEY,
+    LOGIN_INFO_MQTT_CREDENTIALS_KEY,
     LOGIN_INFO_MQTT_PASSWORD_KEYS,
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
@@ -117,7 +117,7 @@ from .protocol import (  # noqa: F401 - re-exported for device_client / back-com
     _parse_alarm_event,
 )
 from .. import settings
-from ..mqtt_config2 import broker_url as _mqtt_config2_broker_url
+from ..mqtt_config2 import broker_url as _mqtt_broker_url
 from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -3350,11 +3350,6 @@ class CameraMixin(
             self._mqtt_url = _env_mqtt
             return self._mqtt_url
 
-        # AIDOT_MQTT_CONFIG2: the broker that endpoint named with the password.
-        # getServerUrlConfig is still called below for its "ip" (the srflx
-        # candidate), and is the URL whenever that endpoint did not supply one.
-        _cfg2_url = await self._async_mqtt_config2_url()
-
         import aiohttp
 
         async def _fetch():
@@ -3372,10 +3367,23 @@ class CameraMixin(
                 ) as resp:
                     return await resp.json(content_type=None)
 
-        try:
+        async def _server_url_config():
             body = await _fetch()
             if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()  # retry once with the refreshed token
+            return body
+
+        # AIDOT_MQTT_CONFIG2: the broker that endpoint named with the password.
+        # getServerUrlConfig is still called, alongside, for its "ip" (the
+        # srflx candidate), and is the URL whenever that endpoint named none.
+        _cfg2_url, body = await asyncio.gather(
+            self._async_mqtt_config2_url(), _server_url_config(), return_exceptions=True
+        )
+        if isinstance(_cfg2_url, BaseException):
+            raise _cfg2_url
+        try:
+            if isinstance(body, BaseException):
+                raise body
 
             data = body.get("data") or {}
             _LOGGER.debug(
@@ -3398,35 +3406,10 @@ class CameraMixin(
                 )
                 mqtt_host = mqtt_fallback_url(self._region)
 
-            # The connection carries the account's MQTT password: refuse a
-            # non-TLS broker URL unless the operator opted in. Nothing is
-            # cached, so every caller sees None (and the open path raises
-            # AidotPlaintextMqttRefused from the scheme recorded here).
-            _plain = plaintext_mqtt_scheme(mqtt_host)
-            if _plain and not settings.read("AIDOT_ALLOW_PLAINTEXT_MQTT"):
-                # Every poll refetches (nothing is cached), so say it loudly
-                # once per change and quietly after that.
-                _level = (
-                    logging.DEBUG
-                    if self._mqtt_url_refused_scheme == _plain
-                    else logging.ERROR
-                )
-                self._mqtt_url_refused_scheme = _plain
-                _LOGGER.log(
-                    _level,
-                    "getServerUrlConfig named a non-TLS MQTT broker (%s://); "
-                    "refusing to send the MQTT password over it. Set "
-                    "AIDOT_ALLOW_PLAINTEXT_MQTT=1 to allow it.",
-                    _plain,
-                )
+            if not self._accept_mqtt_url(
+                mqtt_host, "mqttConfig2" if _cfg2_url else "getServerUrlConfig"
+            ):
                 return None
-            self._mqtt_url_refused_scheme = None
-
-            self._mqtt_url = (
-                mqtt_host
-                if mqtt_host.startswith(("wss://", "ws://"))
-                else f"wss://{mqtt_host}"
-            )
 
             # Capture mqttUser + mqttPassword from this same response if present.
             # iOS SDK binary strings confirm these fields cluster with mqttServerUrl.
@@ -3462,40 +3445,88 @@ class CameraMixin(
 
         except Exception as exc:
             _LOGGER.error("_async_get_mqtt_url failed: %r", exc)
-            if _cfg2_url and not plaintext_mqtt_scheme(_cfg2_url):
-                self._mqtt_url = _cfg2_url
-                return self._mqtt_url
+            if _cfg2_url:
+                return self._accept_mqtt_url(_cfg2_url, "mqttConfig2")
             return None
+
+    def _accept_mqtt_url(self, url: str, source: str) -> Optional[str]:
+        """Cache and return ``url`` as the broker URL, or None if it is refused.
+
+        The connection carries the account's MQTT password: a non-TLS broker
+        URL is refused unless the operator opted in. Nothing is cached then, so
+        every caller sees None (and the open path raises
+        AidotPlaintextMqttRefused from the scheme recorded here). A bare host
+        gets the one rule ``mqtt_config2.broker_url`` applies.
+        """
+        _plain = plaintext_mqtt_scheme(url)
+        if _plain and not settings.read("AIDOT_ALLOW_PLAINTEXT_MQTT"):
+            # Every poll refetches (nothing is cached), so say it loudly
+            # once per change and quietly after that.
+            _level = (
+                logging.DEBUG if self._mqtt_url_refused_scheme == _plain else logging.ERROR
+            )
+            self._mqtt_url_refused_scheme = _plain
+            _LOGGER.log(
+                _level,
+                "%s named a non-TLS MQTT broker (%s://); refusing to send the "
+                "MQTT password over it. Set AIDOT_ALLOW_PLAINTEXT_MQTT=1 to allow it.",
+                source,
+                _plain,
+            )
+            return None
+        self._mqtt_url_refused_scheme = None
+        self._mqtt_url = _mqtt_broker_url(url)
+        return self._mqtt_url
+
+    def _mqtt_credential_record(self) -> dict:
+        """The record of the fetch that issued the account's current MQTT
+        password (``LOGIN_INFO_MQTT_CREDENTIALS_KEY``), or {} when the password
+        is gone or came from elsewhere."""
+        rec = self._user_info.get(LOGIN_INFO_MQTT_CREDENTIALS_KEY)
+        pwd = self._shared_mqtt_password()
+        if isinstance(rec, dict) and pwd and rec.get("password") == pwd:
+            return rec
+        return {}
+
+    def _mqtt_client_id(self) -> Optional[str]:
+        """The clientId issued with the current password, else the account's
+        registered ``mqttClientId``, else None."""
+        return (
+            self._mqtt_credential_record().get("clientId")
+            or self._user_info.get("mqttClientId")
+            or None
+        )
 
     async def _async_mqtt_config2_url(self) -> Optional[str]:
         """The broker URL mqttConfig2 issued with the current password, or None.
 
         None unless AIDOT_MQTT_CONFIG2 is on and the account's password came
-        from that endpoint (the host is stored only alongside it).  Fetches the
-        credential first when there is none, since the host arrives with it.
+        from that endpoint (the host is recorded only alongside it). Fetches
+        the credential first when there is none, since the host arrives with it.
         """
         if not settings.read("AIDOT_MQTT_CONFIG2"):
             return None
         if self._shared_mqtt_password() is None:
             await self._async_refresh_mqtt_credential()
-        host = self._user_info.get(LOGIN_INFO_MQTT_CONFIG2_HOST_KEY)
-        if not (isinstance(host, str) and host and self._shared_mqtt_password()):
+        rec = self._mqtt_credential_record()
+        host = rec.get("host")
+        if rec.get("source") != "mqttConfig2" or not isinstance(host, str) or not host:
             return None
-        return _mqtt_config2_broker_url(host)
+        return _mqtt_broker_url(host)
 
     async def _mqtt_credentials(self) -> tuple:
         """``(mqttUser, mqttPassword, client id)`` for the account's broker.
 
         The user falls back to the account id and the password to empty when
-        the smarthome auth carries neither; the client id is the account's
-        registered ``mqttClientId``, else ``app-<user>``. Four MQTT sessions
+        the smarthome auth carries neither; the client id is
+        ``_mqtt_client_id()``, else ``app-<user>``. Four MQTT sessions
         (control commands, device actions, attribute reads and the shared
         persistent connection) built this the same way.
         """
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
         mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        client_id = self._mqtt_client_id() or f"app-{mqtt_user}"
         return mqtt_user, mqtt_pwd, client_id
 
     async def _async_get_smarthome_auth(self) -> Optional[dict]:
