@@ -17,9 +17,12 @@ function each, all on default paths.
 - **`CameraDeviceClient.cloud_reports_offline`**: True only when the cloud has
   explicitly reported the camera offline, the question the serve loops ask.
 - **`hwaccel.probe_encoder()` and `hwaccel.cached_encoder()`**: a hardware
-  H.264/H.265 encoder proven by a test encode on this host (`["-c:v", name]`),
-  or `[]` for software, cached on disk with the decoder verdicts.
-  `AIDOT_DISABLE_HWACCEL` answers software.
+  H.264/H.265 encoder proven by a test encode on this host, as an
+  `EncoderPlan(input_args, output_args)`: the arguments for before `-i` and
+  after it, which for VAAPI are the render node, the `format=nv12,hwupload`
+  filter and the codec. VAAPI is tried ahead of QSV. `SOFTWARE_ENCODER` (both
+  empty) means software; `AIDOT_DISABLE_HWACCEL` answers it. Cached on disk
+  with the decoder verdicts.
 - **`go2rtc.async_ensure_stream` and `go2rtc.async_remove_stream`: one locked
   write path to go2rtc.** `async_ensure_stream(client, name, source=None, *,
   recreate=False)` sends the optional DELETE (`recreate`, for a camera whose

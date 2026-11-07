@@ -38,7 +38,8 @@ import subprocess
 import sys
 import threading
 import time
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 from .protocol import _sprop_dir  # reuse the same per-user cache root
 
@@ -446,6 +447,8 @@ def warm_decoder_cache(codecs: tuple = ("h264",)) -> "threading.Thread":
             for k, v in _load_cache().items():
                 if isinstance(v, list):
                     _cache_mem.setdefault(k, list(v))
+                elif isinstance(v, dict):  # an encoder plan
+                    _cache_mem.setdefault(k, dict(v))
         except Exception:
             _LOGGER.debug("decoder cache preload failed", exc_info=True)
         for codec in codecs:
@@ -504,14 +507,15 @@ def cached_decoder(codec: str) -> Optional[List[str]]:
 # Encoders                                                                     #
 # --------------------------------------------------------------------------- #
 
-# Hardware encoders that take plain frames with nothing but ``-c:v <name>``,
-# best first. VAAPI is left out: its encoders need a device and an upload
-# filter, so a bare test encode could never prove them. Software (libx264,
-# libx265) is the answer when none of these proves itself, and is the
-# caller's to name.
+# Hardware encoders, best first. VAAPI goes ahead of QSV (both are Intel on a
+# typical x86 box, and VAAPI is the path that needs no extra runtime), as the
+# Home Assistant integration's own clip-encoder probe ordered them. Software
+# (libx264, libx265) is the answer when none of these proves itself, and is
+# the caller's to name.
 _ENCODER_CANDIDATES = {
     "h264": [
         "h264_videotoolbox",
+        "h264_vaapi",
         "h264_v4l2m2m",
         "h264_rkmpp",
         "h264_qsv",
@@ -519,6 +523,7 @@ _ENCODER_CANDIDATES = {
     ],
     "hevc": [
         "hevc_videotoolbox",
+        "hevc_vaapi",
         "hevc_v4l2m2m",
         "hevc_rkmpp",
         "hevc_qsv",
@@ -533,12 +538,81 @@ _ENCODE_SAMPLE = "testsrc=size=320x240:rate=15:duration=0.5"
 _encoders_memo: Optional[set] = None
 
 
+@dataclass(frozen=True)
+class EncoderPlan:
+    """How to run an encoder: arguments for before ``-i`` and after it.
+
+    ``input_args`` go before the input (a VAAPI device), ``output_args`` after
+    it (an upload filter and ``-c:v <name>``). Both empty means software: the
+    caller names libx264 or libx265 itself.
+    """
+
+    input_args: Tuple[str, ...] = ()
+    output_args: Tuple[str, ...] = ()
+
+    @property
+    def is_software(self) -> bool:
+        return not self.output_args
+
+    @property
+    def encoder(self) -> Optional[str]:
+        """The encoder's name, or None for software."""
+        args = self.output_args
+        for i, arg in enumerate(args[:-1]):
+            if arg == "-c:v":
+                return args[i + 1]
+        return None
+
+
+SOFTWARE_ENCODER = EncoderPlan()
+
+
+def _render_node() -> Optional[str]:
+    """The first DRM render node, which VAAPI encodes on, or None."""
+    nodes = sorted(glob.glob("/dev/dri/renderD*"))
+    return nodes[0] if nodes else None
+
+
+def _encoder_plan(name: str) -> Optional[EncoderPlan]:
+    """The full arguments ``name`` needs, or None if it cannot run here.
+
+    A VAAPI encoder takes no system-memory frames: it needs the device and the
+    frames uploaded to it in a format it accepts. Everything else takes plain
+    frames with ``-c:v <name>``."""
+    if name.endswith("_vaapi"):
+        node = _render_node()
+        if node is None:
+            return None
+        return EncoderPlan(
+            ("-vaapi_device", node),
+            ("-vf", "format=nv12,hwupload", "-c:v", name),
+        )
+    return EncoderPlan((), ("-pix_fmt", "yuv420p", "-c:v", name))
+
+
 def _encoder_key(codec: str) -> str:
-    return f"v{_CACHE_SCHEMA}:encode:{codec}:{_ffmpeg_identity()}"
+    # "encode2": a verdict is a plan now, not the bare argument list of the
+    # first shape, which is re-probed rather than misread.
+    return f"v{_CACHE_SCHEMA}:encode2:{codec}:{_ffmpeg_identity()}"
 
 
-def _try_encoder(name: str, codec: str) -> bool:
-    """Encode the test clip with ``name``; True only for a clean run with output.
+def _plan_to_cache(plan: EncoderPlan) -> dict:
+    return {"input": list(plan.input_args), "output": list(plan.output_args)}
+
+
+def _plan_from_cache(value) -> Optional[EncoderPlan]:
+    if not isinstance(value, dict):
+        return None
+    inp, out = value.get("input"), value.get("output")
+    if not (isinstance(inp, list) and isinstance(out, list)):
+        return None
+    if not all(isinstance(a, str) for a in (*inp, *out)):
+        return None
+    return EncoderPlan(tuple(inp), tuple(out))
+
+
+def _try_encoder(plan: EncoderPlan, codec: str) -> bool:
+    """Encode the test clip with ``plan``; True only for a clean run with output.
 
     As for a decoder: a zero exit with nothing on stderr and bytes out, since
     a build lists the encoders compiled in, not the hardware present.
@@ -550,14 +624,12 @@ def _try_encoder(name: str, codec: str) -> bool:
                 "-hide_banner",
                 "-loglevel",
                 "error",
+                *plan.input_args,
                 "-f",
                 "lavfi",
                 "-i",
                 _ENCODE_SAMPLE,
-                "-pix_fmt",
-                "yuv420p",
-                "-c:v",
-                name,
+                *plan.output_args,
                 "-f",
                 codec,
                 "-",
@@ -570,62 +642,62 @@ def _try_encoder(name: str, codec: str) -> bool:
     return r.returncode == 0 and not r.stderr.strip() and bool(r.stdout)
 
 
-def probe_encoder(codec: str = "h264", force: bool = False) -> List[str]:
-    """ffmpeg output arguments for a hardware encoder proven to work here.
+def probe_encoder(codec: str = "h264", force: bool = False) -> EncoderPlan:
+    """An :class:`EncoderPlan` for a hardware encoder proven to work here.
 
-    ``["-c:v", name]`` for the first candidate, in preference order, that is
-    listed by ``ffmpeg -encoders``, plausible on this machine and completes a
-    test encode; ``[]`` when none does, or when ``AIDOT_DISABLE_HWACCEL`` is
-    set, meaning software (the caller names libx264 or libx265). Blocking:
+    The first candidate, in preference order, that is listed by ``ffmpeg
+    -encoders``, plausible on this machine and completes a test encode with
+    the plan's own arguments; :data:`SOFTWARE_ENCODER` (both argument lists
+    empty) when none does, or when ``AIDOT_DISABLE_HWACCEL`` is set. Blocking:
     it spawns ffmpeg the first time. The verdict is cached on disk with the
     decoder verdicts, keyed to the ffmpeg build.
     """
     global _encoders_memo
     codec = codec.lower()
     if codec not in _ENCODER_CANDIDATES or settings.read(_ENV_DISABLE):
-        return []
+        return SOFTWARE_ENCODER
     key = _encoder_key(codec)
-    if not force and key in _cache_mem:
-        return list(_cache_mem[key])
+    if not force:
+        hit = _plan_from_cache(_cache_mem.get(key))
+        if hit is not None:
+            return hit
     cache = _load_cache()
-    if not force and isinstance(cache.get(key), list):
-        _cache_mem[key] = list(cache[key])
-        return list(cache[key])
+    if not force:
+        hit = _plan_from_cache(cache.get(key))
+        if hit is not None:
+            _cache_mem[key] = _plan_to_cache(hit)
+            return hit
 
     if _encoders_memo is None:
         _encoders_memo = _list_names("-encoders")
-    winner: List[str] = []
+    winner = SOFTWARE_ENCODER
     for name in _ENCODER_CANDIDATES[codec]:
-        cand = ["-c:v", name]
-        if name not in _encoders_memo or not _plausible(cand):
+        if name not in _encoders_memo or not _plausible(["-c:v", name]):
             continue
-        if _try_encoder(name, codec):
-            winner = cand
+        plan = _encoder_plan(name)
+        if plan is not None and _try_encoder(plan, codec):
+            winner = plan
             break
         _LOGGER.debug("encoder probe: %s cannot encode here", name)
-    if winner:
-        _LOGGER.info("encoder probe: using %s for %s", winner[1], codec)
-    else:
+    if winner.is_software:
         _LOGGER.debug("encoder probe: software encoding for %s", codec)
-    cache[key] = winner
-    _cache_mem[key] = list(winner)
+    else:
+        _LOGGER.info("encoder probe: using %s for %s", winner.encoder, codec)
+    cache[key] = _cache_mem[key] = _plan_to_cache(winner)
     _save_cache(cache)
-    return list(winner)
+    return winner
 
 
-def cached_encoder(codec: str = "h264") -> Optional[List[str]]:
+def cached_encoder(codec: str = "h264") -> Optional[EncoderPlan]:
     """The cached :func:`probe_encoder` verdict, or None if not probed yet.
 
     Never probes and never reads the disk, so it is safe on an event loop;
     ``warm_decoder_cache`` loads the disk cache, encoder verdicts included.
-    An empty list is a real answer, meaning software.
+    :data:`SOFTWARE_ENCODER` is a real answer, distinct from None.
     """
     codec = codec.lower()
     if codec not in _ENCODER_CANDIDATES:
         return None
     if settings.read(_ENV_DISABLE):
-        return []
-    key = _encoder_key(codec)
-    if key in _cache_mem:
-        return list(_cache_mem[key])
-    return None
+        return SOFTWARE_ENCODER
+    return _plan_from_cache(_cache_mem.get(_encoder_key(codec)))
