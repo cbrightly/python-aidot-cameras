@@ -659,16 +659,15 @@ def _sdes_offer_candidate_lines(
 ) -> str:
     """The a=candidate block for one media section, shaped by the mode.
 
-    ``auto``  - host + srflx (when a public IP is known), in that priority
-                order; the relay is allocated after the offer and trickled
-                (_sdes_open_turn_allocation), so ``relay_addr`` is None here.
-                The LAN wins by ICE priority (host 2130706431 > srflx
-                1694498815 > relay 16777215) and the relay is the last
-                resort - measured on the full fleet 2026-08-24, six of seven
-                cameras direct and only the unit with no route to us on the
-                relay.
+    ``auto``  - host + srflx (when a public IP is known) + relay (when the
+                pre-allocation succeeded), in that priority order.  This is the
+                shipped behaviour: the LAN wins by ICE priority (host
+                2130706431 > srflx 1694498815 > relay 16777215) and the relay
+                is the last resort - measured on the full fleet 2026-08-24,
+                six of seven cameras direct and only the unit with no route to
+                us on the relay.
     ``lan``   - host + srflx only.  Normally moot (lan mode also skips the
-                relay allocation, so there is no relay_addr to omit), but
+                relay pre-allocation, so there is no relay_addr to omit), but
                 enforced here too so the two levers cannot disagree.
     ``relay`` - the relay candidate ONLY, so an ICE-speaking camera has
                 nothing else to nominate.  The relay address must still never
@@ -1835,8 +1834,8 @@ def _turn_target(entries, user_id):
     """(host, port, username, password) of our TURN server, or None.
 
     Our entry is the one whose ``Username`` is our user id, else the first.
-    The SDES open's TURN allocations (pre-offer in relay mode, post-offer
-    otherwise) share it.
+    The SDES open's TURN allocations (before the offer, and the post-offer
+    retry when that failed) share it.
     """
     if not entries:
         return None
@@ -6028,8 +6027,9 @@ class _SdesOpenState:
     _turn_allocate_udp: "Any" = dataclasses.field(init=False)  # turn_pre_allocation
     _skip_turn_prealloc: "Any" = dataclasses.field(init=False)  # turn_pre_allocation
     _conn_mode: "Any" = dataclasses.field(init=False)  # turn_pre_allocation
-    # Packets the post-offer TURN allocate read that were not its own
-    # responses; the STUN responder window answers them first.
+    # Packets a post-offer TURN allocate read that were not its own
+    # responses, as (socket, packet, source); the STUN responder window
+    # answers them first.
     _turn_strays: "list" = dataclasses.field(init=False)  # turn allocation
     _dc_probe_fp: "Any" = dataclasses.field(init=False)  # turn_pre_allocation
     _psk_value_req: "Any" = dataclasses.field(init=False)  # build_offer
@@ -6333,16 +6333,15 @@ async def _sdes_open_turn_pre_allocation(self, ps: _SdesOpenState) -> None:
 
     ps._turn_allocate_udp = turn_allocate_udp
 
-    # --- TURN relay allocation before the offer: relay mode only ------- #
-    # Relay mode puts the allocation in the offer's c=/m= (see
-    # _sdes_offer_media_endpoint), so it has to exist before the offer is
-    # built.  Every other mode offers host/srflx at once and trickles one
-    # allocation after webrtcReq (_sdes_open_turn_allocation), so the camera
-    # starts on the offer while the TURN round-trips (~2-3 s) run.
-    # Connection mode "lan" skips the
-    # relay altogether (never for a battery camera, see
-    # _resolve_sdes_skip_turn).  The cost stays instrumented: grep
-    # ``signaling-wait[`` for sdes-turn-prealloc and sdes-turn-alloc.
+    # --- TURN relay allocation before the offer ------------------------ #
+    # Both sockets (audio and video) are allocated now so the offer carries
+    # the relays: as a=candidate lines in auto mode, and in c=/m= as well in
+    # relay mode (see _sdes_offer_media_endpoint).  Allocating once after
+    # the offer and trickling it was tried and measured slower: on the
+    # A001064 PTZ first media came ~2.3 s later on every cold open.
+    # Connection mode "lan" skips the relay altogether (never for a battery
+    # camera, see _resolve_sdes_skip_turn).  The cost is instrumented: grep
+    # ``signaling-wait[`` for sdes-turn-prealloc.
     ps._skip_turn_prealloc = self._resolve_sdes_skip_turn()
     # Which media path to offer (auto | lan | relay).  Resolved once per
     # open; the candidate blocks below are built from it.  A receipt goes
@@ -6353,11 +6352,7 @@ async def _sdes_open_turn_pre_allocation(self, ps: _SdesOpenState) -> None:
         ps._status(f"SDES: connection mode {ps._conn_mode}")
     _turn_t0 = time.monotonic()
     _turn_did = False
-    if (
-        ps._sdes_turn_entries
-        and not ps._skip_turn_prealloc
-        and ps._conn_mode == "relay"
-    ):
+    if ps._sdes_turn_entries and not ps._skip_turn_prealloc:
         _turn_did = True
         try:
             _tgt_pre = _turn_target(ps._sdes_turn_entries, ps.user_id)
@@ -6381,7 +6376,8 @@ async def _sdes_open_turn_pre_allocation(self, ps: _SdesOpenState) -> None:
             _LOGGER.warning("TURN pre-allocation error: %s", _pre_exc)
     if ps._skip_turn_prealloc and ps._sdes_turn_entries:
         ps._status(
-            "connection mode lan: skipping the TURN relay - host/srflx candidates only"
+            "connection mode lan: skipping TURN relay pre-allocation (~2-3s)"
+            " - host/srflx candidates only"
         )
     _LOGGER.info(
         "signaling-wait[%s] sdes-turn-prealloc elapsed=%dms allocated=%d skipped=%s",
@@ -6860,21 +6856,48 @@ async def _sdes_open_announce_candidates(self, ps: _SdesOpenState) -> None:
     ps._send_sdes_ice_cand = _send_sdes_ice_cand
 
 
-async def _sdes_open_turn_allocation(self, ps: _SdesOpenState) -> None:
-    """Phase of the SDES open: trickle our candidates, then one TURN relay.
+async def _sdes_open_turn_allocation_fallback(self, ps: _SdesOpenState) -> None:
+    """Phase of the SDES open: turn_allocation_fallback.
 
     Split out of ``_open_sdes_stream_impl``; reads and writes the open's
     state through ``ps`` (a ``_SdesOpenState``).
 
-    Host and srflx go out at once.  Then, unless relay mode already
-    allocated before the offer or lan mode skips the relay, ONE allocation
-    on the audio socket - the BUNDLE transport the cameras answer with, on
-    which all media arrives - trickled as a relay candidate for mid 0.  The
-    camera works on the offer while the TURN round-trips run, and what the
-    allocate reads that is not its own goes to ``ps._turn_strays`` for the
+    Retries both allocations when the pre-offer one got nothing, then
+    trickles host, srflx and relay candidates.  The retry runs after
+    webrtcReq, so the camera may already be probing: STUN packets the
+    allocate reads that are not its own go to ``ps._turn_strays`` for the
     STUN window to answer.
     """
     ps._turn_strays = []
+    if not ps._relay_addrs and not ps._skip_turn_prealloc:
+        try:
+            _tgt_r = _turn_target(ps._sdes_turn_entries, ps.user_id)
+            if _tgt_r:
+                for _alloc_sock in (ps._audio_sock, ps._video_sock):
+                    _sock_strays: list = []
+                    _alloc_res = await _run_off_loop(
+                        ps._turn_allocate_udp, _alloc_sock, *_tgt_r, _sock_strays
+                    )
+                    ps._turn_strays.extend(
+                        (_alloc_sock, _p, _a) for _p, _a in _sock_strays
+                    )
+                    if _alloc_res:
+                        ps._relay_addrs[_alloc_sock] = _turn_relay_record(
+                            _alloc_res, *_tgt_r
+                        )
+                        ps._status(
+                            f"TURN relay allocated: "
+                            f"{'audio' if _alloc_sock is ps._audio_sock else 'video'}"
+                            f" -> {_alloc_res[0]}:{_alloc_res[1]}"
+                        )
+                    else:
+                        _LOGGER.warning(
+                            "TURN allocation failed for %s socket",
+                            "audio" if _alloc_sock is ps._audio_sock else "video",
+                        )
+        except Exception as _relay_exc:
+            _LOGGER.warning("TURN relay allocation error: %s", _relay_exc)
+
     for _ice_mid, _ice_port in (("0", ps.audio_port), ("1", ps.video_port)):
         # Host candidate (LAN IP)
         ps._send_sdes_ice_cand(
@@ -6890,34 +6913,6 @@ async def _sdes_open_turn_allocation(self, ps: _SdesOpenState) -> None:
                 f" typ srflx raddr {ps.local_ip} rport {_ice_port}",
                 _ice_mid,
             )
-    _alloc_t0 = time.monotonic()
-    if not ps._relay_addrs and not ps._skip_turn_prealloc:
-        try:
-            _tgt_r = _turn_target(ps._sdes_turn_entries, ps.user_id)
-            if _tgt_r:
-                _alloc_res = await _run_off_loop(
-                    ps._turn_allocate_udp, ps._audio_sock, *_tgt_r, ps._turn_strays
-                )
-                if _alloc_res:
-                    ps._relay_addrs[ps._audio_sock] = _turn_relay_record(
-                        _alloc_res, *_tgt_r
-                    )
-                    ps._status(
-                        f"TURN relay allocated: audio"
-                        f" -> {_alloc_res[0]}:{_alloc_res[1]}"
-                    )
-                else:
-                    _LOGGER.warning("TURN allocation failed for %s socket", "audio")
-        except Exception as _relay_exc:
-            _LOGGER.warning("TURN relay allocation error: %s", _relay_exc)
-        _LOGGER.info(
-            "signaling-wait[%s] sdes-turn-alloc elapsed=%dms allocated=%d strays=%d",
-            self.device_id,
-            int((time.monotonic() - _alloc_t0) * 1000),
-            len(ps._relay_addrs),
-            len(ps._turn_strays),
-        )
-    for _ice_mid, _ice_port in (("0", ps.audio_port), ("1", ps.video_port)):
         # relay candidate - advertised so the camera can probe us via TURN
         # when direct and srflx paths are blocked (port-restricted NAT).
         _relay_sock = ps._audio_sock if _ice_mid == "0" else ps._video_sock
@@ -7064,7 +7059,7 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
     _stun_deadline = time.monotonic() + _stun_max
     _last_pkt_t = time.monotonic()
     _stun_window_t0 = time.monotonic()
-    _strays = [(ps._audio_sock, _p, _a) for _p, _a in ps._turn_strays]
+    _strays = list(ps._turn_strays)
     ps._turn_strays.clear()
 
     def _read_each(_rlist):
@@ -7114,9 +7109,9 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
         elif idle > _pre_stun_idle:
             break  # no STUN at all - non-ICE camera, skip window
         if _strays:
-            # Read by the TURN allocate before this window opened: answered
-            # first, in arrival order.  Any left when SRTP ends the window are
-            # older than that SRTP and are not replayed.
+            # Read by the TURN allocate retry before this window opened:
+            # answered first, in arrival order.  Any left when SRTP ends the
+            # window are older than that SRTP and are not replayed.
             _batch = iter(_strays)
             _strays = []
         else:
@@ -7819,10 +7814,9 @@ class _SdesOpenMixin:
         # --- Allocate UDP ports and determine local IP ---------------------- #
         await _sdes_open_allocate_ports(self, ps)
 
-        # --- Connection mode, and the relay mode's pre-offer allocation ------ #
-        # Relay mode embeds the relay IP/port in the offer's c= and m= lines,
-        # so it allocates before the offer; every other mode allocates once
-        # after webrtcReq and trickles it (_sdes_open_turn_allocation).
+        # --- TURN relay allocation, before the offer ------------------------- #
+        # Both sockets are allocated BEFORE the offer so the offer carries the
+        # relays (a=candidate lines; relay mode also puts one in c=/m=).
         # sock -> (relay_ip, relay_port, realm, nonce, t_host, t_port, key, user).
         # All eight fields are required: CreatePermission has to re-authenticate
         # with USERNAME/REALM/NONCE and the long-term-credential key, so any path
@@ -7861,37 +7855,31 @@ class _SdesOpenMixin:
         # messages is safe for all camera models.
         await _sdes_open_announce_candidates(self, ps)
 
+        # --- Trickle candidates; retry the TURN allocation if it got nothing -- #
+        # _relay_addrs is still empty here if the pre-offer allocation failed;
+        # the retry allocates both sockets again and trickles the relays.
+        # Lan mode skips it, as it skips the pre-offer allocation.
+        await _sdes_open_turn_allocation_fallback(self, ps)
+
         # --- NAT hole-punch: create outbound UDP mapping before STUN window --- #
         # Without a prior outbound packet from each socket, most home-router NATs
         # have no mapping for those ports and silently drop the inbound STUN
         # binding requests from the camera.  Sending a minimal STUN binding-
         # request packet to an external host forces the router to create a NAT
         # entry so the camera's probes are forwarded to our sockets.
-        # Still needed with the one allocation: it is the video socket's only
-        # outbound packet, and with no TURN entry from the cloud (no
-        # allocation at all) the vendor-host fallback is the only mapping
-        # toward the relay host a camera's own allocation can reach us from.
-        # Sent before the allocation below, so neither socket waits on it.
         await _sdes_open_nat_hole_punch(self, ps)
-
-        # --- Trickle host/srflx, then one TURN relay allocation ------------- #
-        # The offer went out without a relay (except in relay mode, which
-        # allocated before it); the allocation runs now, while the camera works
-        # on the offer, and is trickled as a relay candidate.  Lan mode skips it.
-        await _sdes_open_turn_allocation(self, ps)
 
         # --- ICE STUN responder (runs while reservation sockets are still open) #
         # Exit after 0.5 s with no packet, or 1.5 s of silence after the
         # camera's first probe, max 2.5 s total, or at once when the answer is
         # in and the camera is probing.
         #   SRTP early exit: if a non-STUN packet arrives (SRTP), ICE is done.
-        # What keeps the camera's first probes answered: probes that land
-        # during the TURN allocate above are kept (ps._turn_strays) and this
-        # window answers them first, then answers the rest as they come; the
-        # bridge thread starts right after it - nothing below waits on the
-        # answer any more - and answers on the same sockets.  A probe that
-        # lands in between waits in the socket buffer for the bridge's first
-        # read.  A relay-only camera
+        # What keeps the camera's first probes answered: this window answers
+        # them from the moment webrtcReq is out (first any the TURN retry
+        # above read, ps._turn_strays), and the bridge thread starts
+        # right after it - nothing below waits on the answer any more - and
+        # answers on the same sockets.  A probe that lands in between waits in
+        # the socket buffer for the bridge's first read.  A relay-only camera
         # probes only through our TURN permission, which is installed when its
         # answer or trickle names it (the first-media wait and the bridge tick).
         await _sdes_open_stun_responder_window(self, ps)

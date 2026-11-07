@@ -171,19 +171,22 @@ function each, all on default paths.
   tick, and the off-subnet warning. A camera that refuses (-50002/-50015) is
   still stopped by the first-media wait's check.
 
-- **One SDES TURN allocation, trickled after the offer.** The open made two
-  blocking TURN Allocates (audio and video, ~2-3 s) before it built the
-  offer. The offer now carries host and srflx candidates; after `webrtcReq`
-  one Allocate on the audio socket (the BUNDLE transport) runs and is
-  trickled as a relay candidate, while the camera works on the offer.
-  Packets the Allocate reads that are not its own (the camera may already be
-  probing) are answered by the STUN window instead of dropped. Connection
-  mode `relay` still allocates both sockets before the offer, since it puts
-  the relay in c=/m=; `lan` still skips the relay, never for a battery
-  camera. The elapsed time is logged as `signaling-wait[...] sdes-turn-alloc`.
-  The NAT hole-punch, including the fallback to the vendor relay host when
-  the cloud sends no TURN entry, is kept and now goes out before the
-  Allocate.
+- **Not shipping: one SDES TURN allocation, trickled after the offer.** An
+  earlier entry here announced that the auto connection mode would make one
+  TURN Allocate on the audio socket after `webrtcReq` and trickle the relay,
+  in place of the two Allocates (audio and video) made before the offer.
+  Measured live it was slower: on the A001064 PTZ first media came at +5.3
+  to +6.3 s instead of rc71's +2.9 s, with video arriving 4.2 s after the
+  bridge started instead of 1.7 s, about 2.3 s lost on every cold open (the
+  A001513 L2s, the relay-only one included, showed no difference). Auto mode
+  is back to rc71's behaviour: both sockets are allocated before the offer
+  and the offer carries both relays (`TURN relay pre-allocated (offer)` and
+  `signaling-wait[...] sdes-turn-prealloc ... allocated=2` in the log).
+  Kept from that work: the post-offer allocate retry (when the pre-offer
+  one got nothing) keeps the camera's STUN probes it reads, at most 32 and
+  only packets with the STUN magic cookie, for the STUN window to answer
+  first; and the window reads its sockets lazily, so a socket it has not
+  read when SRTP ends it keeps its packet for the bridge.
 
 ### Deprecated
 - **`AIDOT_PERSISTENT_MQTT`** is accepted and ignored; set to

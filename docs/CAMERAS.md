@@ -28,7 +28,7 @@ also expose the LAN-direct control path.
 ### Battery detection (why it matters)
 
 `is_battery_camera` gates *every* battery protection at once: the SDES TURN relay
-allocation is force-kept (a camera woken through the cloud has no LAN host
+pre-allocation is force-kept (a camera woken through the cloud has no LAN host
 candidate, so the relay is its only return path), the cloud `setKeepAliveTime` is
 renewed mid-view, the HTTP wake fires before signaling, and the camera is told
 `powerType=2`.
@@ -170,21 +170,15 @@ the ~2 s `iceConfig` fetch on a re-open after the warm session lapses.
   time-to-first-frame, per-second fps timeline + gaps, nominated ICE path, RTP
   health, RSSI. `python scripts/camera_diag.py --name <substr>`.
 
-### The TURN relay allocation, and connection mode `lan`
+### The TURN relay pre-allocation, and connection mode `lan`
 
-The SDES offer goes out with host and srflx candidates only. After `webrtcReq`
-the open makes ONE TURN Allocate on the audio socket (the BUNDLE transport) and
-trickles the relay candidate by `iceCandidateReq`, so the camera works on the
-offer while the round-trips run; it used to make two before building the offer
-(~2-3 s on every open). Connection mode `relay` still allocates before the
-offer, because it puts the relay address in the offer's c=/m=. On a LAN the
-camera's host candidate wins and the relay is never used, so
-`AIDOT_SDES_CONNECTION_MODE=lan` skips it. **Never for a battery camera**,
-whatever the mode says: it is woken through the cloud and the relay is its
-only return path (validated live on an A001513: with the relay it streams h264
-1280x960, with the skip it serves nothing). The elapsed time is logged as
-`signaling-wait[...] sdes-turn-alloc` (and `sdes-turn-prealloc` for the
-pre-offer step).
+Before building the offer the SDES path does two synchronous TURN Allocate
+round-trips (audio + video), ~2-3 s, so the offer can carry a relay address.
+On a LAN the camera's host candidate wins and that relay is never used, so
+`AIDOT_SDES_CONNECTION_MODE=lan` skips the pre-allocation. **Never for a
+battery camera**, whatever the mode says: it is woken through the cloud and
+the relay is its only return path (validated live on an A001513: with the
+relay it streams h264 1280x960, with the skip it serves nothing).
 
 An adaptive "fast first, then patient" keepalive strategy and a separate
 skip-TURN switch were tried here and removed in 1.0.0rc44: the fast failure
