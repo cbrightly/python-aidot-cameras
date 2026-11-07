@@ -931,6 +931,9 @@ def test_a_session_is_measured_to_its_end_not_past_its_teardown(
     ]
     assert paced, [r.getMessage() for r in caplog.records]
     assert "ended after 0s" in paced[0]
+    # The line says why: the PC died, and how long before the end media last
+    # moved - what separates a camera that stopped sending from a dropped link.
+    assert "(connection closed, last media " in paced[0], paced[0]
 
 
 def test_the_short_session_line_is_throttled(monkeypatch, cam, caplog):

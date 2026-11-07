@@ -1433,6 +1433,8 @@ class _DtlsServeLoopState:
     _session_opened_at: "Any" = dataclasses.field(init=False)
     # prepare_session, serve_cycle; read by session_end
     _session_ended_at: "Any" = dataclasses.field(init=False)
+    # Why the last serve cycle stopped, for the session-end log line.
+    _session_end_reason: "Any" = dataclasses.field(init=False)
     _session_pacer: "Any" = dataclasses.field(init=False)  # the loop
     loop: "Any" = dataclasses.field(init=False)  # the loop
     vq: "Any" = dataclasses.field(init=False)  # open_attempt
@@ -1571,6 +1573,7 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     # short-session threshold.
     ps._session_opened_at = ps.loop.time()
     ps._session_ended_at = ps._session_opened_at  # serve_cycle moves it on
+    ps._session_end_reason = "stopped before serving"
     self._stream_session = ps.session
     ps.pc = ps.session._pc
     # PC-dead test for the serve loop.  closed/failed are terminal at
@@ -1802,11 +1805,16 @@ async def _dtls_serve_loop_serve_cycle(
             _watching_dtls = None
             # Serve until the peer connection dies, the view is released,
             # or the mux or publish thread ends on its own.
+            _why = "serve stopped"
             while self._streaming_active:
                 await asyncio.sleep(0.5)
                 if ps._pc_dead():
+                    _why = "connection " + str(
+                        getattr(ps.pc, "connectionState", "closed")
+                    )
                     break
                 if not ps.mux_thread.is_alive():
+                    _why = "publish ended"
                     # The publish ended (go2rtc gone, stream missing,
                     # connection dropped) or the mux could not write: end
                     # this cycle; the next one starts over after a short
@@ -1849,6 +1857,7 @@ async def _dtls_serve_loop_serve_cycle(
                         self.device_id,
                         _vid_grace,
                     )
+                    _why = "no video"
                     break
                 _stall = _now - progress[0]
                 if _stall < 0.5:
@@ -1915,6 +1924,7 @@ async def _dtls_serve_loop_serve_cycle(
                     # nothing. stream_idle_s=0 masked it, which is why
                     # never-release fleets still worked.)
                     if ps.idle_release:
+                        _why = "idle release"
                         break
             # Read the canary once more however the cycle ended: a break on a
             # dead PC or an exited mux or publish thread comes
@@ -1935,6 +1945,12 @@ async def _dtls_serve_loop_serve_cycle(
             # threshold. The session's end is worked out from it once, in
             # _dtls_serve_loop_session_end.
             ps._session_ended_at = ps.loop.time()
+            # The last media is what tells a camera that stopped sending from
+            # a connection that dropped under a flowing stream.
+            ps._session_end_reason = "%s, last media %.1fs before" % (
+                _why,
+                max(0.0, ps._session_ended_at - progress[0]),
+            )
             # Tear down this cycle's serve and mux before the next.
             _mux_ended = not ps.mux_thread.is_alive()
             ps.stop_flag.set()
@@ -2060,7 +2076,7 @@ async def _dtls_serve_loop_session_end(
     if _wait is None:
         _LOGGER.warning(
             "camera %s: %d DTLS sessions in a row ended within %.0fs or "
-            "delivered no video (the last: %.0fs, %s) - stopping the "
+            "delivered no video (the last: %.0fs, %s, %s) - stopping the "
             "background serve. Re-opening keeps the camera busy without "
             "fixing that. A live view will still open a session; set "
             "AIDOT_DTLS_FUTILE_VIDEO_LIMIT=0 to keep retrying.",
@@ -2069,6 +2085,7 @@ async def _dtls_serve_loop_session_end(
             settings.read("AIDOT_DTLS_SHORT_SESSION_S"),
             _lived,
             "no video" if _no_video else "with video",
+            ps._session_end_reason,
         )
         # Same teardown the SDES abandon does. Leaving the keepalive marked
         # active and the go2rtc stream registered points a viewer at a serve
@@ -2081,11 +2098,12 @@ async def _dtls_serve_loop_session_end(
         return None
     _LOGGER.log(
         _repeat_log_level(_n - 1, every=_PACER_LOG_EVERY),
-        "DTLS serve: session for %s ended after %.0fs%s - waiting"
+        "DTLS serve: session for %s ended after %.0fs%s (%s) - waiting"
         " %.0fs before reopening (%d failed in a row)",
         self.device_id,
         _lived,
         " with no video" if _no_video else "",
+        ps._session_end_reason,
         _wait,
         _n,
     )

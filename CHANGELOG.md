@@ -49,6 +49,11 @@ function each, all on default paths.
   changes.
 
 ### Changed
+- **A DTLS session's end says why.** The "ended after Ns - waiting" line (and
+  the give-up warning) now name what stopped it - the connection's state,
+  the publish ending, no video, or an idle release - and how long before the
+  end media last arrived, so a camera that stopped sending reads differently
+  from a link that dropped under a flowing stream.
 - **A missing broker URL reads as a missing connection.** A device command,
   device-action query or attribute read no longer checks for the URL first;
   all three go through one persistent-connection request, so with no URL an
