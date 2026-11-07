@@ -103,7 +103,11 @@ class TestOneSessionModeBuilder:
         builders = [
             c
             for c in calls_to(tree, "avio_header")
-            if c.args and getattr(c.args[1], "value", None) == 5376
+            if c.args
+            and (
+                getattr(c.args[1], "value", None) == 5376
+                or getattr(c.args[1], "id", None) == "E_CMD_AVIO_CTRL_SESSION_MODE_REQ"
+            )
         ]
         assert len(builders) == 1, [c.lineno for c in builders]
 

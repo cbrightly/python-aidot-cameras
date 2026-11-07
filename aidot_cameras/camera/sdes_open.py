@@ -31,6 +31,16 @@ from ..exceptions import (
 )
 from .constants import (
     _LIVE_PLAY_NOT_READY,
+    CMD_AVIO_CTRL_HEARTHEAT_REQ,
+    CMD_AVIO_CTRL_HEARTHEAT_RESP,
+    E_CMD_AVIO_CTRL_SESSION_MODE_REQ,
+    E_CMD_AVIO_CTRL_SESSION_MODE_RESP,
+    IIOTYPE_USER_TYPE_NOTIFY_TRACK_REQ,
+    IOTYPE_USER_IPCAM_AUDIOSTART,
+    IOTYPE_USER_IPCAM_AUDIOSTOP,
+    IOTYPE_USER_IPCAM_SPEAKERSTART,
+    IOTYPE_USER_IPCAM_SPEAKERSTOP,
+    IOTYPE_USER_IPCAM_START,
     SDES_SPEAKERSTART_DELAY,
     stun_server_uris,
 )
@@ -45,6 +55,7 @@ from .rtsp_publish import (
 )
 from .protocol import (
     ipc_envelope,
+    avio_frame,
     avio_header,
     mask_sdp_secrets,
     AVIO_HDR_LEN,
@@ -1187,7 +1198,7 @@ def _session_mode_req(seq: int, ts: int, mode: int, *, avstream: bool) -> bytes:
         body = _struct_mod.pack("<IIIIIII", 0, 0, mode, 0, 0, 0, 0)
     else:
         body = _struct_mod.pack("<IB3x", 0, mode)
-    return avio_header(seq, 5376, ts, len(body), 0) + body
+    return avio_header(seq, E_CMD_AVIO_CTRL_SESSION_MODE_REQ, ts, len(body), 0) + body
 
 
 def _session_mode_echoed(frame: bytes) -> "Optional[int]":
@@ -1199,7 +1210,7 @@ def _session_mode_echoed(frame: bytes) -> "Optional[int]":
     from .sd_playback import session_mode_of
 
     resp = parse_avio_response(frame)
-    if resp is None or resp.command != 5377:
+    if resp is None or resp.command != E_CMD_AVIO_CTRL_SESSION_MODE_RESP:
         return None
     return session_mode_of(resp.payload)
 
@@ -3855,6 +3866,26 @@ def make_sdes_bridge(
             else:
                 _media_hold.send(_sock, _pkt, _port, pace=_time_br.sleep, log=_status)
 
+        def _sdes_send_avio(_seq, _cmd, _extra=b""):
+            """The one AVIO sender on SDES: an encrypted SCTP DATA chunk (PPID 53).
+
+            The heartbeat, the speaker and every session command go out here,
+            on the socket and address the SCTP handshake (and LIVING) used.
+            False while that socket is not known yet; raises when the send
+            fails, and each caller decides what that means to it.  Bridge
+            thread only: _sctp_data advances the shared TSN.
+            """
+            _csock = _sctp.get("dcep_sock")
+            _csrc = _sctp.get("dcep_src")
+            if _csock is None or _csrc is None:
+                return False
+            _chunk = _sctp_data(53, avio_frame(_seq, _cmd, _extra))
+            _csock.sendto(
+                _enc_c8_sctp(_sctp_pkt(_sctp["peer_tag"], _chunk)),
+                _csrc,
+            )
+            return True
+
         try:
             while True:
                 if _media_hold is not None and _media_hold.pending_flush():
@@ -3968,15 +3999,12 @@ def make_sdes_bridge(
                 ):
                     import random as _r_hb
 
-                    _hb_seq = _r_hb.randint(0, 0x7FFFFFFF)
-                    _hb_ts = int(_time_br.time() * 1000)
-                    # 28-byte AVIO header, cmd=5156 (HEARTHEAT_REQ), empty payload.
-                    _hb_avio = avio_header(_hb_seq, 5156, _hb_ts, 0, 0)
+                    # HEARTHEAT_REQ, empty payload, and a random seq: the
+                    # app's sendHeartbeat is the one control send that does
+                    # not take the dSeq counter.
                     try:
-                        _hb_chunk = _sctp_data(53, _hb_avio)
-                        _hb_sock.sendto(
-                            _enc_c8_sctp(_sctp_pkt(_sctp["peer_tag"], _hb_chunk)),  # noqa: F821
-                            _hb_src,
+                        _sdes_send_avio(
+                            _r_hb.randint(0, 0x7FFFFFFF), CMD_AVIO_CTRL_HEARTHEAT_REQ
                         )
                         _last_hb_ts = _time_br.time()
                         _trace(
@@ -4011,7 +4039,9 @@ def make_sdes_bridge(
                             >= SDES_SPEAKERSTART_DELAY
                         ):
                             try:
-                                _cmd_chan[0](848, b"\x00" * 8)  # SPEAKERSTART
+                                _cmd_chan[0](
+                                    IOTYPE_USER_IPCAM_SPEAKERSTART, b"\x00" * 8
+                                )
                                 _talk_state["speaker_on"] = True
                                 _status(
                                     "SDES talk: sent SPEAKERSTART(848) (bridge thread)"
@@ -4027,7 +4057,7 @@ def make_sdes_bridge(
                         "want_speaker"
                     ):
                         try:
-                            _cmd_chan[0](849, b"\x00" * 8)  # SPEAKERSTOP
+                            _cmd_chan[0](IOTYPE_USER_IPCAM_SPEAKERSTOP, b"\x00" * 8)
                             _talk_state["speaker_on"] = False
                             _status("SDES talk: sent SPEAKERSTOP(849) (bridge thread)")
                         except Exception:
@@ -4255,26 +4285,11 @@ def make_sdes_bridge(
                                 # check seq for SESSION_MODE (see
                                 # tests/test_session_mode_seq.py).
                                 _seq = self._next_dseq()
-                                _ts = int(_time_br.time() * 1000)
-                                _avio = (
-                                    avio_header(_seq, _cmd, _ts, len(_extra), 0)
-                                    + _extra
-                                )
                                 # True once handed to the socket, so a
                                 # caller that must not lose the command
                                 # (PLAY_START) can try again.
-                                _csock = _sctp.get("dcep_sock")
-                                _csrc = _sctp.get("dcep_src")
-                                if _csock is None or _csrc is None:
-                                    return False
                                 try:
-                                    _chunk = _sctp_data(53, _avio)
-                                    _csock.sendto(
-                                        _enc_c8_sctp(
-                                            _sctp_pkt(_sctp["peer_tag"], _chunk)
-                                        ),
-                                        _csrc,
-                                    )
+                                    return _sdes_send_avio(_seq, _cmd, _extra)
                                 except Exception:
                                     _LOGGER.debug(
                                         "camera %s: swallowed exception in %s",
@@ -4283,7 +4298,6 @@ def make_sdes_bridge(
                                         exc_info=True,
                                     )
                                     return False
-                                return True
 
                             def _persistent_sdes_abort():
                                 """ABORT the association from the same socket the commands use.
@@ -5384,7 +5398,10 @@ def make_sdes_bridge(
                                             # and logged here long before anything
                                             # could receive them; hand them to
                                             # whoever asked.
-                                            if _sc_cmd == 5377:
+                                            if (
+                                                _sc_cmd
+                                                == E_CMD_AVIO_CTRL_SESSION_MODE_RESP
+                                            ):
                                                 # SESSION_MODE_RESP: the camera's
                                                 # answer to the LIVING trigger.
                                                 # Counted whether or not anything
@@ -5539,14 +5556,14 @@ def make_sdes_bridge(
                                 # KVSWebRTCChannel.smali:11661): the camera can send it unsolicited, and
                                 # without it here an 804 frame is misrouted as PCMA noise.
                                 _avio_cmds = {
-                                    5376,
-                                    5377,
-                                    5156,
-                                    5157,
-                                    768,
-                                    769,
-                                    511,
-                                    804,
+                                    E_CMD_AVIO_CTRL_SESSION_MODE_REQ,
+                                    E_CMD_AVIO_CTRL_SESSION_MODE_RESP,
+                                    CMD_AVIO_CTRL_HEARTHEAT_REQ,
+                                    CMD_AVIO_CTRL_HEARTHEAT_RESP,
+                                    IOTYPE_USER_IPCAM_AUDIOSTART,
+                                    IOTYPE_USER_IPCAM_AUDIOSTOP,
+                                    IOTYPE_USER_IPCAM_START,
+                                    IIOTYPE_USER_TYPE_NOTIFY_TRACK_REQ,
                                 }
                                 # No response dispatch here.  Measured
                                 # 2026-08-07: the camera's replies come back

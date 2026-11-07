@@ -28,8 +28,8 @@ import pytest
 from aidot_cameras.camera.protocol import (
     NackTracker,
     build_nack,
-    decode_nack_seqs,
 )
+from tests.rtcp_decode import decode_nack_seqs
 
 
 # --------------------------------------------------------------------------
@@ -248,8 +248,8 @@ def test_it_does_not_re_ask_before_a_repeat_could_have_arrived():
 
 
 def test_an_independent_rtcp_parser_reads_it_as_a_generic_nack():
-    # decode_nack_seqs is our own decoder, so a round trip through it would
-    # still pass with a consistently wrong bitmask. aiortc is a separate
+    # decode_nack_seqs is the tests' own decoder, so a round trip through it
+    # would still pass with a consistently wrong bitmask. aiortc is a separate
     # implementation of the same RFC; if it agrees, the camera will too.
     from aidot_cameras._vendor.aiortc.rtp import RtcpPacket
 
@@ -259,15 +259,6 @@ def test_an_independent_rtcp_parser_reads_it_as_a_generic_nack():
     assert parsed.ssrc == 0xAB12CD34
     assert parsed.media_ssrc == 0x11223344
     assert parsed.lost == seqs
-
-
-def test_we_read_back_what_an_independent_implementation_builds():
-    from aidot_cameras._vendor.aiortc.rtp import RtcpRtpfbPacket
-
-    seqs = [100, 101, 105, 116, 200]
-    theirs = RtcpRtpfbPacket(fmt=1, ssrc=0xAB12CD34, media_ssrc=0x11223344)
-    theirs.lost = list(seqs)
-    assert decode_nack_seqs(bytes(theirs)) == seqs
 
 
 def test_one_report_is_capped_so_a_burst_cannot_flood_the_link():

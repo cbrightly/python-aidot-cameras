@@ -145,6 +145,35 @@ def fallback_turn_uris() -> list:
     )
 
 
+# AVIO control command ids, one table for both transports.  Named after the
+# app's com.tutk.IOTC.AVIOCTRLDEFs, values copied from it (read 2026-11-07).
+# Every frame these ride in is the 28-byte header protocol.avio_header packs.
+IOTYPE_USER_IPCAM_START = 0x1FF  # 511
+IOTYPE_USER_IPCAM_AUDIOSTART = 0x300  # 768
+IOTYPE_USER_IPCAM_AUDIOSTOP = 0x301  # 769
+IOTYPE_USER_IPCAM_LISTEVENT_REQ = 0x318
+IOTYPE_USER_IPCAM_LISTEVENT_RESP = 0x319
+IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL = 0x31A
+IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL_RESP = 0x31B
+IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ = 0x320  # 800
+IOTYPE_USER_IPCAM_SETSTREAMCTRL_RESP = 0x321  # 801
+IOTYPE_USER_IPCAM_GETSTREAMCTRL_REQ = 0x322  # 802
+#: The app calls 0x324 both SETMOTIONDETECT_REQ and NOTIFY_TRACK_REQ; what the
+#: camera sends unprompted under it is the track-switch notification
+#: (processRespData case 0x324).
+IIOTYPE_USER_TYPE_NOTIFY_TRACK_REQ = 0x324  # 804
+IOTYPE_USER_IPCAM_SPEAKERSTART = 0x350  # 848
+IOTYPE_USER_IPCAM_SPEAKERSTOP = 0x351  # 849
+#: The SPEAKERSTART ack on the WebRTC transports; 0x352 is the TUTK one.
+IOTYPE_USER_IPCAM_SPEAKERSTART_WEB_RTC_RESP = 0x353  # 851
+IOTYPE_USER_IPCAM_HASLISTEVENT_REQ = 0x4B5
+IOTYPE_USER_IPCAM_HASLISTEVENT_RESP = 0x4B6
+IOTYPE_USER_IPCAM_PTZ_COMMAND = 0x1001  # 4097
+CMD_AVIO_CTRL_HEARTHEAT_REQ = 0x1424  # 5156, the app's spelling
+CMD_AVIO_CTRL_HEARTHEAT_RESP = 0x1425  # 5157
+E_CMD_AVIO_CTRL_SESSION_MODE_REQ = 0x1500  # 5376, "LIVING"
+E_CMD_AVIO_CTRL_SESSION_MODE_RESP = 0x1501  # 5377
+
 # Frame type values
 _FRAME_TYPE_P_FRAME = 2
 _FRAME_TYPE_B_FRAME = 3
@@ -177,8 +206,8 @@ _PTZ_DIR_CODES: dict = {
 # next.  Adding it would offer a control that does nothing.  The two arms below
 # are the ones with enum names, kept for parity with the command the app sends.  Sent as SETSTREAMCTRL (cmd 800) over the active session,
 # payload <IB3x> = channel(0) + quality byte (SMsgAVIoctrlSetStreamCtrlReq).
-SETSTREAMCTRL_CMD = 800
-GETSTREAMCTRL_CMD = 802
+SETSTREAMCTRL_CMD = IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ
+GETSTREAMCTRL_CMD = IOTYPE_USER_IPCAM_GETSTREAMCTRL_REQ
 _STREAM_QUALITY: dict = {"hd": 1, "sd": 5}  # AVIOCTRL_QUALITY_MAX / _MIDDLE
 
 

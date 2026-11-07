@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot_cameras.camera.protocol import decode_nack_seqs
+from tests.rtcp_decode import decode_nack_seqs
 from aidot_cameras.camera.sdes_open import (
     _sdes_nack_enabled,
     _send_video_nack,

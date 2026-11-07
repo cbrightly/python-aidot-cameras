@@ -28,7 +28,8 @@ import struct
 
 import pytest
 
-from aidot_cameras.camera.protocol import build_remb, decode_remb_bitrate
+from aidot_cameras.camera.protocol import build_remb
+from tests.rtcp_decode import decode_remb_bitrate
 
 
 def test_it_is_a_payload_specific_feedback_packet():

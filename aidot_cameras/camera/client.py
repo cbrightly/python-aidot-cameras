@@ -101,10 +101,6 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _serve_port,
     _dtls_av_mux_run,
     _h264_has_keyframe,
-    _mqtt_session_sync,
-    _mqtt_session,
-    _mqtt_session_with_status,
-    _mqtt_get_playback_server_info,
     _ip_looks_ascii_garbled,
     _normalize_bundle_ice_credentials,
     _reorder_m_section_ice_attrs,
@@ -246,6 +242,26 @@ _MQTT_CREDENTIAL_REFETCH_FLOOR = 30.0
 # video. Idle release is measured in minutes, so seconds of staleness here costs
 # nothing.
 _VIEWER_CHECK_INTERVAL_S = 10.0
+
+
+_PERSISTENT_MQTT_KNOB_WARNED = False
+
+
+def _warn_persistent_mqtt_knob() -> None:
+    """Say once per process that ``AIDOT_PERSISTENT_MQTT=0`` no longer does anything.
+
+    The per-operation MQTT path it selected is gone: it connected with the
+    account's one clientId and so evicted the persistent connection. The knob
+    is still accepted so a setting left in place does not break anything.
+    """
+    global _PERSISTENT_MQTT_KNOB_WARNED
+    if _PERSISTENT_MQTT_KNOB_WARNED or settings.read("AIDOT_PERSISTENT_MQTT"):
+        return
+    _PERSISTENT_MQTT_KNOB_WARNED = True
+    _LOGGER.warning(
+        "AIDOT_PERSISTENT_MQTT is deprecated and ignored: every MQTT "
+        "operation uses the one persistent connection. Remove the setting."
+    )
 
 
 def _spawn_bg(coro):
@@ -3936,7 +3952,6 @@ class CameraMixin(
         """
         import json as _json
 
-        mqtt_user, mqtt_pwd, client_id = await self._mqtt_credentials()
         user_id = self.user_id
 
         mqtt_url = await self._async_get_mqtt_url()
@@ -3985,10 +4000,7 @@ class CameraMixin(
             _wake_items.append((_wake_topic, _wake_payload))
         publish_items.append((pub_topic, payload_str))
 
-        if self._resolve_persistent_mqtt():
-            pm = await self._get_persistent_mqtt()
-        else:
-            pm = None
+        pm = await self._get_persistent_mqtt()
 
         import time as _time
 
@@ -3997,27 +4009,11 @@ class CameraMixin(
             now=_time.monotonic(),
             last_wake=getattr(self, "_last_wake_mono", None),
         )
-        if _plan.wake and _wake_items:
+        if _plan.wake and _wake_items and pm is not None:
             try:
-                if pm is not None:
-                    await pm.request(
-                        publish_items=_wake_items, subscribe_topics=[], timeout=2.0
-                    )
-                else:
-                    # The SAME registered client id, never a variant: the broker
-                    # allows one session per account, so a second id evicts the
-                    # live one. Safe because the wake session is awaited to
-                    # completion before the command session opens - they never
-                    # overlap.
-                    await _mqtt_session_with_status(
-                        mqtt_url,
-                        mqtt_user,
-                        mqtt_pwd,
-                        client_id,
-                        subscribe_topics=[],
-                        publish_items=_wake_items,
-                        duration=2.0,
-                    )
+                await pm.request(
+                    publish_items=_wake_items, subscribe_topics=[], timeout=2.0
+                )
                 self._last_wake_mono = _time.monotonic()
             except Exception:
                 # A failed wake must not stop the command: on a camera that is
@@ -4032,34 +4028,16 @@ class CameraMixin(
                 subscribe_topics=sub_topics,
                 timeout=timeout,
             )
-            if _st and _st.get("error"):
-                # Persistent connection unavailable - fall back to a fresh per-op
-                # connect so the command isn't silently dropped (and isn't falsely
-                # reported as sent on the empty result the persistent path returns).
-                _LOGGER.debug(
-                    "_mqtt_device_cmd: persistent MQTT failed (%s); falling back "
-                    "to a per-op session for %s",
-                    _st.get("error"),
-                    device_id,
-                )
-                messages, _st = await _mqtt_session_with_status(
-                    mqtt_url,
-                    mqtt_user,
-                    mqtt_pwd,
-                    client_id,
-                    subscribe_topics=sub_topics,
-                    publish_items=publish_items,
-                    duration=timeout,
-                )
         else:
-            messages, _st = await _mqtt_session_with_status(
-                mqtt_url,
-                mqtt_user,
-                mqtt_pwd,
-                client_id,
-                subscribe_topics=sub_topics,
-                publish_items=publish_items,
-                duration=timeout,
+            messages, _st = [], {"error": "no persistent MQTT connection"}
+        if _st and _st.get("error"):
+            # No per-op fallback: it connected with the same clientId, which
+            # evicts the persistent connection. The command is reported as not
+            # sent rather than falsely as sent on an empty result.
+            _LOGGER.debug(
+                "_mqtt_device_cmd: MQTT unavailable for %s (%s)",
+                device_id,
+                _st.get("error"),
             )
 
         # A fire-and-forget caller only needs to know the publish left the host.
@@ -4278,7 +4256,6 @@ class CameraMixin(
 
         user_id = self.user_id
         device_id = self.device_id
-        mqtt_user, mqtt_pwd, client_id = await self._mqtt_credentials()
         mqtt_url = await self._async_get_mqtt_url()
         if not mqtt_url:
             _LOGGER.debug("async_query_device_action: no MQTT URL for %s", device_id)
@@ -4311,21 +4288,14 @@ class CameraMixin(
         ]
         sub_topics = [f"iot/v1/c/{user_id}/#", f"iot/v1/cb/{user_id}/#"]
 
-        # Use the PERSISTENT connection when there is one, exactly as
-        # `_mqtt_device_cmd` does. Opening a fresh session here instead looked
-        # harmless and is not: it connects with the same `mqttClientId` the
-        # long-lived connection is already using, and a broker evicts the older
-        # session on a duplicate client id. Inside Home Assistant that means the
-        # query and the integration's own connection knock each other off, and
-        # the reply never arrives -- the request appears to work and simply
-        # returns nothing. It only "worked" when tested with the integration
-        # stopped, which is the one condition that hides the conflict.
+        # The PERSISTENT connection only, exactly as `_mqtt_device_cmd`. A fresh
+        # session here connects with the same `mqttClientId` the long-lived
+        # connection is already using, and a broker evicts the older session
+        # on a duplicate client id: inside Home Assistant the query and the
+        # integration's own connection knock each other off and the reply
+        # never arrives.
         messages = []
-        pm = (
-            await self._get_persistent_mqtt()
-            if self._resolve_persistent_mqtt()
-            else None
-        )
+        pm = await self._get_persistent_mqtt()
         if pm is not None:
             messages, _st = await pm.request(
                 publish_items=publish_items,
@@ -4334,22 +4304,10 @@ class CameraMixin(
             )
             if _st and _st.get("error"):
                 _LOGGER.debug(
-                    "async_query_device_action: persistent MQTT failed (%s); "
-                    "falling back for %s",
-                    _st.get("error"),
+                    "async_query_device_action: MQTT failed for %s (%s)",
                     device_id,
+                    _st.get("error"),
                 )
-                pm = None
-        if pm is None:
-            messages, _st = await _mqtt_session_with_status(
-                mqtt_url,
-                mqtt_user,
-                mqtt_pwd,
-                client_id,
-                subscribe_topics=sub_topics,
-                publish_items=publish_items,
-                duration=timeout,
-            )
         # Several devAction messages can be in flight on a shared connection,
         # and some carry no `out` at all (a bare acknowledgement). Taking the
         # first match therefore loses data: a camera reporting six sound
@@ -4539,17 +4497,12 @@ class CameraMixin(
 
         The suffix was presumably there to avoid evicting whoever legitimately
         holds that id, since a duplicate connect displaces it. The answer to
-        that is the shared persistent connection, now preferred unconditionally
-        - same identity, no second connect. The one-off fallback uses the exact
-        id and declines outright while a stream is active, because losing
-        someone's video to read a settings dict is a bad trade.
+        that is the shared persistent connection, the only one used - same
+        identity, no second connect.
 
-        **Caveat worth knowing:** that guard only sees streams on *this*
-        client. Calling the fallback path from a second process while a Home
-        Assistant instance is connected will displace HA's MQTT session,
-        because there is one authorized client id per account and a duplicate
-        connect wins. In-process there is no issue - the persistent connection
-        is shared and no second connect happens.
+        **Caveat worth knowing:** there is one authorized client id per
+        account, so a second process (a script beside a running Home Assistant)
+        builds its own persistent connection and the two displace each other.
 
         Mirrors the official app flow (l.java + IpcServiceImpl.java):
           1. Subscribe iot/v1/c/{userId}/# and iot/v1/cb/{deviceId}/#
@@ -4578,21 +4531,10 @@ class CameraMixin(
                     exc_info=True,
                 )
 
-        mqtt_user, mqtt_pwd, _base_cid = await self._mqtt_credentials()
-        # The broker binds the credential to the EXACT registered mqttClientId.
-        # A suffixed connect is refused outright with CONNACK rc=4, "Bad user
-        # name or password" - so the "-cmd" id this used to build could never
-        # establish a session, subscribe to anything, or receive a reply.  It
-        # was not a subtly wrong id; it was no session at all.  (Measured
-        # 2026-08-14 with Home Assistant disabled so nothing competed: suffixed
-        # refused, exact accepted.)
-        #
-        # The suffix was presumably there to avoid evicting the connection that
-        # legitimately holds this id, since a duplicate connect displaces it.
-        # The right answer to that is the shared persistent connection below -
-        # same identity, no second connect - which is why it is now preferred
-        # unconditionally rather than only under AIDOT_PERSISTENT_MQTT.
-        client_id = _base_cid
+        # The broker binds the credential to the EXACT registered mqttClientId
+        # (a suffixed connect is refused with CONNACK rc=4, measured
+        # 2026-08-14), and a duplicate connect evicts whoever holds it - so the
+        # read rides the shared persistent connection below, never its own.
         user_id = self.user_id
         device_id = self.device_id
 
@@ -4645,10 +4587,7 @@ class CameraMixin(
             )
             publish_items.append((_wake_topic, _wake_payload))
 
-        _sess_st = None  # transport status, when a per-op session ran
-        # Prefer the shared connection whatever the env var says: it already
-        # holds the only client id this broker accepts, so riding it avoids
-        # both the refused connect and the eviction the fallback risks.
+        messages: list = []
         try:
             pm = await self._get_persistent_mqtt()
         except Exception:
@@ -4658,63 +4597,21 @@ class CameraMixin(
                 exc_info=True,
             )
             pm = None
+        _st = None
         if pm is not None:
             messages, _st = await pm.request(
                 publish_items=publish_items,
                 subscribe_topics=sub_topics,
                 timeout=timeout,
             )
-            if _st and _st.get("error"):
-                # Persistent connection unavailable - fall back to a fresh per-op
-                # connect so a transient outage doesn't masquerade as "no attrs".
-                _LOGGER.debug(
-                    "async_get_camera_attributes: persistent MQTT failed (%s); "
-                    "falling back to a per-op session for %s",
-                    _st.get("error"),
-                    device_id,
-                )
-                if getattr(self, "_streaming_active", False):
-                    # The fallback connects with the id a live stream is using,
-                    # and a duplicate connect evicts it. Losing someone's video
-                    # to read a settings dict is a bad trade, so decline.
-                    _LOGGER.info(
-                        "async_get_camera_attributes: %s is streaming and the "
-                        "persistent connection is unavailable; declining rather "
-                        "than evicting the stream's MQTT session.",
-                        device_id,
-                    )
-                    return None
-                messages, _sess_st = await _mqtt_session_with_status(
-                    mqtt_url,
-                    mqtt_user,
-                    mqtt_pwd,
-                    client_id,
-                    subscribe_topics=sub_topics,
-                    publish_items=publish_items,
-                    duration=timeout,
-                )
-        else:
-            # Status-bearing on purpose. The plain wrapper returns messages and
-            # drops the transport status, so "the broker refused our connect"
-            # and "the camera stayed quiet" both arrive as an empty list. That
-            # ambiguity is what let a client id the broker rejects outright go
-            # unnoticed through three investigations.
-            messages, _sess_st = await _mqtt_session_with_status(
-                mqtt_url,
-                mqtt_user,
-                mqtt_pwd,
-                client_id,
-                subscribe_topics=sub_topics,
-                publish_items=publish_items,
-                duration=timeout,
-            )
-        if _sess_st and not _sess_st.get("connected"):
+        if pm is None or (_st and _st.get("error")):
+            # Said as a transport failure, so "the broker would not have us"
+            # and "the camera stayed quiet" do not both read as an empty push.
             _LOGGER.warning(
-                "async_get_camera_attributes: no MQTT session for %s (rc=%s %s) - "
+                "async_get_camera_attributes: no MQTT session for %s (%s) - "
                 "this is a transport failure, not the camera staying quiet.",
                 device_id,
-                _sess_st.get("rc"),
-                _sess_st.get("rc_str"),
+                (_st or {}).get("error") or "no persistent connection",
             )
 
         for topic, raw in messages:
@@ -6973,27 +6870,16 @@ class CameraMixin(
         # forcing the relay while skipping its allocation would offer nothing.
         return self._resolve_sdes_connection_mode() == "lan"
 
-    def _resolve_persistent_mqtt(self) -> bool:
-        """Whether commands, attribute fetches, AND stream-open signaling reuse ONE
-        account-level persistent MQTT connection (matching the app's
-        LDSBaseMqttServiceImpl) instead of connecting per op.
-
-        **Default ON** (2026-06-17): this is exactly how the official app behaves -
-        one persistent connection per login session - and a live soak showed it
-        cuts SDES NO_MEDIA from ~57% to ~19% (no regression). It is also safer
-        than connect-per-op, which can collide on the single authorized client_id.
-        Disable via ``AIDOT_PERSISTENT_MQTT`` in {0,false,no,off} or per-camera
-        ``_persistent_mqtt_opt=False`` (the explicit opt always wins)."""
-        opt = getattr(self, "_persistent_mqtt_opt", None)
-        if opt is not None:
-            return bool(opt)
-        return settings.read("AIDOT_PERSISTENT_MQTT")
-
     async def _get_persistent_mqtt(self):
         """Get-or-create the account-shared ``_PersistentMqtt`` (one per account,
         keyed on the shared ``login_info``).  The broker binds auth to the single
         authorized client_id, so there must be exactly one.  Returns None if it
-        can't be built (caller falls back to per-op ``_mqtt_session``)."""
+        can't be built; there is no per-op fallback, because a second connect
+        with that client_id evicts this one.
+
+        It is the only MQTT transport, as the app's LDSBaseMqttServiceImpl is.
+        ``AIDOT_PERSISTENT_MQTT`` used to switch it off and is now ignored."""
+        _warn_persistent_mqtt_knob()
         # _user_info is the shared account dict (same object across the account's
         # DeviceClients, and the same object as AidotClient.login_info) - the right
         # place to cache one connection per account.

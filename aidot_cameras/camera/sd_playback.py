@@ -34,8 +34,13 @@ import datetime
 import struct
 from typing import Any, NamedTuple, Optional
 
-RECORD_PLAYCONTROL_REQ_CMD = 0x31A
-RECORD_PLAYCONTROL_RESP_CMD = 0x31B
+from .constants import (
+    IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL,
+    IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL_RESP,
+)
+
+RECORD_PLAYCONTROL_REQ_CMD = IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL
+RECORD_PLAYCONTROL_RESP_CMD = IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL_RESP
 
 # Values from the vendor enum. START and STOP are the ones exercised on
 # hardware (A001064, 2026-10-27); the others are listed so a caller does not

@@ -11,7 +11,13 @@ import struct
 
 from typing import Optional
 
-from .constants import _PTZ_DIR_CODES, _STREAM_QUALITY, SETSTREAMCTRL_CMD
+from .constants import (
+    _PTZ_DIR_CODES,
+    _STREAM_QUALITY,
+    IOTYPE_USER_IPCAM_PTZ_COMMAND,
+    IOTYPE_USER_IPCAM_SETSTREAMCTRL_RESP,
+    SETSTREAMCTRL_CMD,
+)
 from .models import _cloud_reports_offline
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,7 +41,7 @@ LIGHT_BRIGHTNESS_MIN = 10
 LIGHT_BRIGHTNESS_MAX = 100
 
 #: The camera's ack for SETSTREAMCTRL (800).
-SETSTREAMCTRL_RESP_CMD = 801
+SETSTREAMCTRL_RESP_CMD = IOTYPE_USER_IPCAM_SETSTREAMCTRL_RESP
 #: Measured 0.01-0.03s; short so a control call never holds up a view.
 _SETSTREAMCTRL_ACK_S = 1.5
 
@@ -486,7 +492,7 @@ class _CameraControlsMixin:
         if session is None:
             _LOGGER.warning("async_ptz_move: no active stream session")
             return False
-        ok = session._avio_cmd(4097, payload)
+        ok = session._avio_cmd(IOTYPE_USER_IPCAM_PTZ_COMMAND, payload)
         _LOGGER.debug(
             "PTZ %s (code=%d speed=%d preset=%d) -> %s",
             direction,
