@@ -2990,6 +2990,16 @@ class CameraMixin(
             self._cloud_online_explicit = True
         return self.status
 
+    @property
+    def cloud_reports_offline(self) -> bool:
+        """True only when the cloud has explicitly reported this camera offline.
+
+        Not the same as ``not status.online``: that reads False before the
+        cloud has said anything, and only an explicit report means the camera
+        is gone. The serve loops' offline pause, the open-failure log level
+        and the reboot guard ask this same question."""
+        return _cloud_reports_offline(self)
+
     def _open_fail_logger(self):
         """Pick the log level for a stream-open failure in the serve/keepalive
         loops: WARNING for a genuine failure, but DEBUG when the cloud has

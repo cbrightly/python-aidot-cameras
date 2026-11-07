@@ -101,3 +101,24 @@ def test_declaring_nothing_is_not_the_same_as_reporting_nothing():
     """
     info = CameraDeviceInformation(_device([{"identity": "Dimming"}]))
     assert "LingerDuration" not in info.declared_properties
+
+
+# --- the firmware version the cloud reports ------------------------------- #
+
+
+def test_firmware_version_from_the_record():
+    cases = [
+        ({"firmwareVersion": "1.2.3"}, "1.2.3"),
+        ({"deviceInfo": {"firmwareVersion": " 4.5.6 "}}, "4.5.6"),
+        (
+            {"firmwareVersion": "1.0", "deviceInfo": {"firmwareVersion": "2.0"}},
+            "1.0",
+        ),
+        ({"firmwareVersion": "", "deviceInfo": {"firmwareVersion": "2.0"}}, "2.0"),
+        ({"firmwareVersion": 7}, None),
+        ({"deviceInfo": "nope"}, None),
+        ({}, None),
+    ]
+    for extra, expected in cases:
+        info = CameraDeviceInformation(_device([], **extra))
+        assert info.firmware_version == expected, extra

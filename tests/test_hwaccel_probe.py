@@ -342,3 +342,102 @@ def test_only_h264_is_warmed_by_default():
 
     default = inspect.signature(hwaccel.warm_decoder_cache).parameters["codecs"].default
     assert default == ("h264",)
+
+
+# --- encoders: proven by a test encode, cached like the decoders ----------- #
+
+
+@pytest.fixture
+def encoders(monkeypatch):
+    monkeypatch.setattr(hwaccel, "_encoders_memo", None)
+    listed = {"libx264", "h264_v4l2m2m", "h264_nvenc", "h264_qsv"}
+    monkeypatch.setattr(hwaccel, "_list_names", lambda flag: set(listed))
+    monkeypatch.setattr(hwaccel, "_plausible", lambda cand: True)
+    return listed
+
+
+def test_an_encoder_is_chosen_only_once_it_encodes(monkeypatch, encoders):
+    tried = []
+
+    def try_encoder(name, codec):
+        tried.append(name)
+        return name == "h264_qsv"
+
+    monkeypatch.setattr(hwaccel, "_try_encoder", try_encoder)
+    assert hwaccel.probe_encoder("h264", force=True) == ["-c:v", "h264_qsv"]
+    # Listed candidates in preference order, up to the first that encodes;
+    # unlisted ones are never spawned.
+    assert tried == ["h264_v4l2m2m", "h264_qsv"]
+
+
+def test_no_encoder_that_encodes_means_software(monkeypatch, encoders):
+    monkeypatch.setattr(hwaccel, "_try_encoder", lambda name, codec: False)
+    assert hwaccel.probe_encoder("h264", force=True) == []
+    assert hwaccel.cached_encoder("h264") == []
+
+
+def test_the_encoder_verdict_is_cached_on_disk(monkeypatch, encoders):
+    monkeypatch.setattr(hwaccel, "_try_encoder", lambda name, codec: True)
+    assert hwaccel.cached_encoder("h264") is None  # never probes
+    assert hwaccel.probe_encoder("h264") == ["-c:v", "h264_v4l2m2m"]
+    assert hwaccel.cached_encoder("h264") == ["-c:v", "h264_v4l2m2m"]
+    # A new process: the disk answers, nothing is spawned.
+    monkeypatch.setattr(hwaccel, "_cache_mem", {})
+    monkeypatch.setattr(
+        hwaccel, "_try_encoder", lambda name, codec: pytest.fail("re-probed")
+    )
+    assert hwaccel.probe_encoder("h264") == ["-c:v", "h264_v4l2m2m"]
+    # And an encoder verdict never answers for a decoder.
+    assert hwaccel.cached_decoder("h264") is None
+
+
+def test_an_implausible_encoder_is_never_spawned(monkeypatch, encoders):
+    monkeypatch.setattr(
+        hwaccel, "_plausible", lambda cand: cand[1] != "h264_v4l2m2m"
+    )
+    tried = []
+    monkeypatch.setattr(
+        hwaccel, "_try_encoder", lambda name, codec: tried.append(name) or False
+    )
+    hwaccel.probe_encoder("h264", force=True)
+    assert "h264_v4l2m2m" not in tried
+
+
+def test_disabling_hwaccel_means_software_encoding(monkeypatch, encoders):
+    monkeypatch.setenv("AIDOT_DISABLE_HWACCEL", "1")
+    monkeypatch.setattr(
+        hwaccel, "_try_encoder", lambda name, codec: pytest.fail("probed")
+    )
+    assert hwaccel.probe_encoder("h264") == []
+    assert hwaccel.cached_encoder("h264") == []
+    assert hwaccel.probe_encoder("vp9") == []
+    monkeypatch.delenv("AIDOT_DISABLE_HWACCEL")
+    assert hwaccel.cached_encoder("vp9") is None
+
+
+def test_encoders_are_read_from_the_encoders_list():
+    out = (
+        "Encoders:\n"
+        " V..... = Video\n"
+        " ------\n"
+        " V....D libx264              libx264 H.264 / AVC\n"
+        " V....D h264_v4l2m2m         V4L2 mem2mem H.264 encoder wrapper\n"
+    )
+
+    class _R:
+        stdout = out
+
+    import subprocess
+
+    orig = subprocess.run
+    subprocess.run = lambda *a, **k: _R()
+    try:
+        assert {"libx264", "h264_v4l2m2m"} <= hwaccel._list_names("-encoders")
+    finally:
+        subprocess.run = orig
+
+
+def test_hardware_encoder_names_are_judged_by_their_device():
+    assert hwaccel._plausible(["-c:v", "h264_videotoolbox"]) == (
+        sys.platform == "darwin"
+    )

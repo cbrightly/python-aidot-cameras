@@ -185,9 +185,10 @@ def _list_names(flag: str) -> set:
         parts = ln.split()
         if not parts or ln.startswith(" -") or ln.rstrip().endswith(":"):
             continue
-        # -decoders lines are " V....D name  description"; -hwaccels is one
-        # bare name per line under a heading.
-        names.add(parts[1] if flag == "-decoders" and len(parts) > 1 else parts[0])
+        # -decoders and -encoders lines are " V....D name  description";
+        # -hwaccels is one bare name per line under a heading.
+        coded = flag in ("-decoders", "-encoders")
+        names.add(parts[1] if coded and len(parts) > 1 else parts[0])
     return names
 
 
@@ -206,11 +207,11 @@ def _plausible(cand: List[str]) -> bool:
     if not cand:
         return True  # software
     name = cand[1]
-    if name == "videotoolbox":
+    if name == "videotoolbox" or name.endswith("_videotoolbox"):
         return sys.platform == "darwin"
     if name == "vaapi" or name.endswith("_vaapi") or name.endswith("_qsv"):
         return bool(glob.glob("/dev/dri/render*"))
-    if name.endswith("_cuvid") or name.endswith("_nvdec"):
+    if name.endswith(("_cuvid", "_nvdec", "_nvenc")):
         return bool(glob.glob("/dev/nvidia*"))
     if name.endswith("_v4l2m2m"):
         return bool(glob.glob("/dev/video*"))
@@ -499,3 +500,132 @@ def cached_decoder(codec: str) -> Optional[List[str]]:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Encoders                                                                     #
+# --------------------------------------------------------------------------- #
+
+# Hardware encoders that take plain frames with nothing but ``-c:v <name>``,
+# best first. VAAPI is left out: its encoders need a device and an upload
+# filter, so a bare test encode could never prove them. Software (libx264,
+# libx265) is the answer when none of these proves itself, and is the
+# caller's to name.
+_ENCODER_CANDIDATES = {
+    "h264": [
+        "h264_videotoolbox",
+        "h264_v4l2m2m",
+        "h264_rkmpp",
+        "h264_qsv",
+        "h264_nvenc",
+    ],
+    "hevc": [
+        "hevc_videotoolbox",
+        "hevc_v4l2m2m",
+        "hevc_rkmpp",
+        "hevc_qsv",
+        "hevc_nvenc",
+    ],
+}
+
+#: The test encode: small, short, and still a size every hardware encoder
+#: above accepts (several refuse frames under 128 pixels a side).
+_ENCODE_SAMPLE = "testsrc=size=320x240:rate=15:duration=0.5"
+
+_encoders_memo: Optional[set] = None
+
+
+def _encoder_key(codec: str) -> str:
+    return f"v{_CACHE_SCHEMA}:encode:{codec}:{_ffmpeg_identity()}"
+
+
+def _try_encoder(name: str, codec: str) -> bool:
+    """Encode the test clip with ``name``; True only for a clean run with output.
+
+    As for a decoder: a zero exit with nothing on stderr and bytes out, since
+    a build lists the encoders compiled in, not the hardware present.
+    """
+    try:
+        r = subprocess.run(
+            [
+                _ffmpeg(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                _ENCODE_SAMPLE,
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                name,
+                "-f",
+                codec,
+                "-",
+            ],
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT_S,
+        )
+    except Exception:
+        return False
+    return r.returncode == 0 and not r.stderr.strip() and bool(r.stdout)
+
+
+def probe_encoder(codec: str = "h264", force: bool = False) -> List[str]:
+    """ffmpeg output arguments for a hardware encoder proven to work here.
+
+    ``["-c:v", name]`` for the first candidate, in preference order, that is
+    listed by ``ffmpeg -encoders``, plausible on this machine and completes a
+    test encode; ``[]`` when none does, or when ``AIDOT_DISABLE_HWACCEL`` is
+    set, meaning software (the caller names libx264 or libx265). Blocking:
+    it spawns ffmpeg the first time. The verdict is cached on disk with the
+    decoder verdicts, keyed to the ffmpeg build.
+    """
+    global _encoders_memo
+    codec = codec.lower()
+    if codec not in _ENCODER_CANDIDATES or settings.read(_ENV_DISABLE):
+        return []
+    key = _encoder_key(codec)
+    if not force and key in _cache_mem:
+        return list(_cache_mem[key])
+    cache = _load_cache()
+    if not force and isinstance(cache.get(key), list):
+        _cache_mem[key] = list(cache[key])
+        return list(cache[key])
+
+    if _encoders_memo is None:
+        _encoders_memo = _list_names("-encoders")
+    winner: List[str] = []
+    for name in _ENCODER_CANDIDATES[codec]:
+        cand = ["-c:v", name]
+        if name not in _encoders_memo or not _plausible(cand):
+            continue
+        if _try_encoder(name, codec):
+            winner = cand
+            break
+        _LOGGER.debug("encoder probe: %s cannot encode here", name)
+    if winner:
+        _LOGGER.info("encoder probe: using %s for %s", winner[1], codec)
+    else:
+        _LOGGER.debug("encoder probe: software encoding for %s", codec)
+    cache[key] = winner
+    _cache_mem[key] = list(winner)
+    _save_cache(cache)
+    return list(winner)
+
+
+def cached_encoder(codec: str = "h264") -> Optional[List[str]]:
+    """The cached :func:`probe_encoder` verdict, or None if not probed yet.
+
+    Never probes and never reads the disk, so it is safe on an event loop;
+    ``warm_decoder_cache`` loads the disk cache, encoder verdicts included.
+    An empty list is a real answer, meaning software.
+    """
+    codec = codec.lower()
+    if codec not in _ENCODER_CANDIDATES:
+        return None
+    if settings.read(_ENV_DISABLE):
+        return []
+    key = _encoder_key(codec)
+    if key in _cache_mem:
+        return list(_cache_mem[key])
+    return None

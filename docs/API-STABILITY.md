@@ -80,6 +80,9 @@ release still catches them.
 | `aidot_cameras.const` | `CONF_*`, `DEFAULT_COUNTRY_CODE`, `SUPPORTED_COUNTRY_CODES` |
 | `aidot_cameras.camera.constants` | published protocol constants (`TALK_PCM_*`) |
 | `aidot_cameras.camera.hwaccel.probe_decoder` | decoder capability probe |
+| `aidot_cameras.camera.hwaccel.probe_encoder(codec="h264")`, `cached_encoder(codec="h264")` | the hardware-encoder probe: `["-c:v", name]` for an encoder proven by a test encode on this host, `[]` for software. `probe_encoder` blocks and caches its verdict on disk; `cached_encoder` never probes and answers `None` until a verdict is known |
+| `CameraDeviceInformation.firmware_version` | the firmware version the cloud reports for the camera (`firmwareVersion`, or `deviceInfo.firmwareVersion`), or `None` |
+| `CameraDeviceClient.cloud_reports_offline` | True only when the cloud has explicitly reported the camera offline; `status.online` alone is False before the cloud has said anything |
 | the `aidot-go2rtc` command (also `python -m aidot_cameras`) | its arguments (`<dev_id> <output_url>`, `--list`, `-v`) and the meaning of the output URL schemes it accepts. Its log output is not part of the promise |
 | the `AIDOT_*` environment variables in the README's tables | per-install tuning seams. The four `StreamSettings` covers are read after a client's own setting and before the default. The variables in `docs/ENVIRONMENT.md` are not part of this promise: each may go once the behaviour it tunes has settled, and the CHANGELOG says so when one does |
 
@@ -93,11 +96,11 @@ by the `lan_control` row.
 `async_ensure_stream` promises three things. Every write it sends to one go2rtc
 server (by base URL, in one event loop) is serialised with every other write
 through the module, `Go2rtcClient.ensure_stream`/`remove_stream` included, and
-its own DELETE, PUT and stream-list check run with nothing in between. It never
-raises. Its `outcome` is `REGISTERED` (PUT accepted), `UNCHANGED` (PUT
-rejected, stream present: go2rtc still serves it from its old definition) or
-`FAILED` (stream absent); `ok` is true for the first two. `reason` is for
-humans, not parsing.
+its own DELETE and PUT run with no other write in between; the stream-list
+check after a rejected PUT is a read and is not serialised. It never raises.
+Its `outcome` is `REGISTERED` (PUT accepted), `UNCHANGED` (PUT rejected,
+stream present: go2rtc still serves it from its old definition) or `FAILED`
+(stream absent); `ok` is true for the first two.
 
 Two of these carry a promise about what they DO NOT say, and callers depend on it:
 

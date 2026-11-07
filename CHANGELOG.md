@@ -12,6 +12,14 @@ through one registration, and both transports send AVIO commands through one
 function each, all on default paths.
 
 ### Added
+- **`CameraDeviceInformation.firmware_version`**: the firmware version the
+  cloud reports (`firmwareVersion`, or `deviceInfo.firmwareVersion`), or None.
+- **`CameraDeviceClient.cloud_reports_offline`**: True only when the cloud has
+  explicitly reported the camera offline, the question the serve loops ask.
+- **`hwaccel.probe_encoder()` and `hwaccel.cached_encoder()`**: a hardware
+  H.264/H.265 encoder proven by a test encode on this host (`["-c:v", name]`),
+  or `[]` for software, cached on disk with the decoder verdicts.
+  `AIDOT_DISABLE_HWACCEL` answers software.
 - **`go2rtc.async_ensure_stream` and `go2rtc.async_remove_stream`: one locked
   write path to go2rtc.** `async_ensure_stream(client, name, source=None, *,
   recreate=False)` sends the optional DELETE (`recreate`, for a camera whose

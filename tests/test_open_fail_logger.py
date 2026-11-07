@@ -28,3 +28,22 @@ def test_warning_when_online():
 def test_warning_when_online_state_unknown():
     # Never explicitly reported offline -> treat a failure as genuine (WARNING).
     assert _dc(online=False, explicit=False)() == camclient._LOGGER.warning
+
+
+def test_the_public_property_asks_the_same_question():
+    for online, explicit, expected in (
+        (False, True, True),
+        (True, True, False),
+        (False, False, False),
+    ):
+        o = types.SimpleNamespace(
+            status=types.SimpleNamespace(online=online),
+            _cloud_online_explicit=explicit,
+        )
+        assert camclient.CameraMixin.cloud_reports_offline.fget(o) is expected
+
+
+def test_the_device_client_exposes_it():
+    from aidot_cameras import CameraDeviceClient
+
+    assert isinstance(CameraDeviceClient.cloud_reports_offline, property)
