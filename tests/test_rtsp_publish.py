@@ -2907,14 +2907,10 @@ def test_publish_sink_feeds_the_tee_aac_on_its_own_clock():
     assert s.aac_seconds > 0
 
 
-def test_publish_sink_send_errors_raise_unless_quiet():
+def test_publish_sink_send_errors_are_left_to_the_loop():
     s, _aac, sess = _sink()
-    with pytest.raises(rp.RtspPublishError):
-        s.feed_aac(_SinkPub(fail=True), b"\xd5" * 160, 160, 1.0)
-    assert sess.aac == [], "a frame that did not go out is not teed"
-    s, _aac, sess = _sink(quiet_send_errors=True)
     s.feed_aac(_SinkPub(fail=True), b"\xd5" * 160, 160, 1.0)  # left to pub.alive
-    assert len(sess.aac) == 1
+    assert sess.aac == [], "a frame that did not go out is not teed"
 
 
 def test_publish_sink_without_aac_reports_zeros_and_no_summary():

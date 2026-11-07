@@ -160,9 +160,22 @@ def test_a_new_address_or_a_success_starts_the_count_again(monkeypatch):
 
 
 def test_only_the_first_gap_of_a_session_is_a_warning():
-    assert rp._gap_log_level(0) == logging.WARNING
-    assert rp._gap_log_level(1) == logging.DEBUG
-    assert rp._gap_log_level(50) == logging.DEBUG
+    from aidot_cameras.camera.protocol import _repeat_log_level
+
+    assert _repeat_log_level(0, loud=logging.WARNING) == logging.WARNING
+    assert _repeat_log_level(1, loud=logging.WARNING) == logging.DEBUG
+    assert _repeat_log_level(50, loud=logging.WARNING) == logging.DEBUG
+
+
+def test_a_quiet_pacer_logs_info_every_nth_failure():
+    from aidot_cameras.camera.protocol import _repeat_log_level
+
+    levels = [_repeat_log_level(n, every=6) for n in range(-1, 13)]
+    assert [n for n, lv in zip(range(-1, 13), levels) if lv == logging.INFO] == [
+        0,
+        6,
+        12,
+    ]
 
 
 # 4. a cloud call that failed while the network came up -------------------- #
