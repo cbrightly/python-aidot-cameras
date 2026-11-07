@@ -23,14 +23,19 @@ import tempfile
 import threading
 import time
 import zlib
+from fractions import Fraction
 from typing import Any, Callable, Optional, NamedTuple
 
+from .aac_track import AAC_CLOCK_RATE
 from .agc import AlawAgc
 from .constants import TALK_PCM_FRAME_BYTES, TALK_PCM_RATE
 
 from .. import settings
 
 _LOGGER = logging.getLogger(__name__)
+
+#: The AAC stream's time base in the A/V mux (one per process, not per packet).
+_AAC_TIME_BASE = Fraction(1, AAC_CLOCK_RATE)
 
 
 def _make_status_pair(status_callback, logger):
@@ -778,25 +783,40 @@ class ReconnectPacer:
         cap: float,
         *,
         rand: Optional[Callable[[], float]] = None,
+        floor_frac: float = 0.0,
     ) -> None:
         self._base = base
         self._cap = cap
         self._rand = rand  # forwarded to next_backoff; injectable for tests
+        #: At the cap, ``fail_delay`` draws in ``[floor_frac * cap, cap]``
+        #: rather than ``[base, cap]`` (0: no floor).
+        self._floor_frac = floor_frac
         self._attempt = 0
 
     @property
     def attempt(self) -> int:
-        """Consecutive-failure count (read-only). Callers that need to escalate
-        beyond this pacer's own cap (see the DTLS serve loop's slow-probe
-        throttle) key off this instead of duplicating the counter."""
+        """Consecutive-failure count (read-only)."""
         return self._attempt
+
+    def _ceiling_at_cap(self, attempt: int) -> bool:
+        return self._base * 2 ** min(max(attempt, 0), 30) >= self._cap
+
+    @property
+    def at_cap(self) -> bool:
+        """True when the last counted failure's backoff had reached ``cap``."""
+        return self._attempt > 0 and self._ceiling_at_cap(self._attempt - 1)
 
     def fail_delay(self) -> float:
         """Delay after a failed OPEN (no session established): the current attempt's
         backoff, then escalate - so the first failure waits exactly ``base``."""
-        delay = next_backoff(
-            self._attempt, base=self._base, cap=self._cap, rand=self._rand
-        )
+        if self._floor_frac and self._ceiling_at_cap(self._attempt):
+            delay = next_backoff(
+                1, base=self._floor_frac * self._cap, cap=self._cap, rand=self._rand
+            )
+        else:
+            delay = next_backoff(
+                self._attempt, base=self._base, cap=self._cap, rand=self._rand
+            )
         self._attempt += 1
         return delay
 
@@ -812,6 +832,16 @@ class ReconnectPacer:
         """Clear the failure count - e.g. after a successful open in a loop that has
         no end-of-session escalation (the DTLS serve loop, gated by its own spacing)."""
         self._attempt = 0
+
+
+def _repeat_log_level(n: int, *, every: int = 0, loud: int = logging.INFO) -> int:
+    """The level for the ``n``-th repeat (from 0) of a recurring log line:
+    ``loud`` for the first and, with ``every``, for every ``every``-th after
+    it; DEBUG for the rest. A condition that persists for hours then says so
+    without a line per occurrence."""
+    if n == 0 or (every and n % every == 0):
+        return loud
+    return logging.DEBUG
 
 
 def _write_text_file(path: str, text: str) -> None:
@@ -1570,7 +1600,6 @@ def _dtls_av_mux_run(
         raise ValueError("video_codec=None needs align_audio_start")
     import time as _t
     import queue as _q
-    from fractions import Fraction
 
     try:
         import av
@@ -1642,7 +1671,6 @@ def _dtls_av_mux_run(
         vs.time_base = Fraction(1, 90000)
     try:
         from .aac_track import (
-            AAC_CLOCK_RATE,
             AAC_SAMPLES_PER_FRAME,
             ALAW_SILENCE,
             PCMA_RATE,
@@ -1814,7 +1842,7 @@ def _dtls_av_mux_run(
             pkt = av.Packet(adts_header(len(au)) + au)
             pkt.stream = aenc
             pkt.pts = pkt.dts = a_pts[0]
-            pkt.time_base = Fraction(1, AAC_CLOCK_RATE)
+            pkt.time_base = _AAC_TIME_BASE
             a_pts[0] += AAC_SAMPLES_PER_FRAME
             try:
                 out.mux(pkt)
@@ -2627,11 +2655,16 @@ class _AvioCollector:
 
     _keeps_listening = True
 
-    def __init__(self, router: "AvioResponseRouter", command: int) -> None:
+    def __init__(
+        self, router: "AvioResponseRouter", command: int, max_replies: int = 0
+    ) -> None:
         self._router = router
         self._command = command
         self._loop = asyncio.get_running_loop()
-        self._replies: "asyncio.Queue[AvioResponse]" = asyncio.Queue()
+        # Bounded by what the reader will take; a reply past that is dropped.
+        self._replies: "asyncio.Queue[AvioResponse]" = asyncio.Queue(
+            maxsize=max_replies
+        )
         self._closed = False
 
     def _accepts(self, resp) -> bool:
@@ -2641,7 +2674,20 @@ class _AvioCollector:
         return self._closed
 
     def _deliver(self, resp) -> None:
-        self._loop.call_soon_threadsafe(self._replies.put_nowait, resp)
+        try:
+            on_loop = asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            on_loop = False
+        if on_loop:
+            self._put(resp)
+        else:
+            self._loop.call_soon_threadsafe(self._put, resp)
+
+    def _put(self, resp) -> None:
+        try:
+            self._replies.put_nowait(resp)
+        except asyncio.QueueFull:
+            pass
 
     async def next(self, timeout: float) -> "Optional[AvioResponse]":
         """The next reply, or None if none arrives within ``timeout``."""
@@ -2684,13 +2730,14 @@ class AvioResponseRouter:
             self._waiting.setdefault(command, []).append(waiter)
         return waiter
 
-    def collect(self, command: int) -> _AvioCollector:
+    def collect(self, command: int, max_replies: int = 0) -> _AvioCollector:
         """Register for every response carrying ``command`` until cancelled.
 
         Same rule as ``expect``: register before sending. Takes its turn with
-        the single questions for that command in registration order.
+        the single questions for that command in registration order. Holds at
+        most ``max_replies`` unread replies (0: no limit).
         """
-        collector = _AvioCollector(self, command)
+        collector = _AvioCollector(self, command, max_replies)
         with self._lock:
             self._waiting.setdefault(command, []).append(collector)
         return collector
@@ -3211,7 +3258,8 @@ class AvioRequestMixin:
         Replies are matched on ``response_cmd`` alone, so two of these for the
         same command at once on one session can take each other's replies.
         """
-        pages = self._avio_responses.collect(response_cmd)
+        max_replies = max(1, max_replies)
+        pages = self._avio_responses.collect(response_cmd, max_replies)
         replies: "list[AvioResponse]" = []
         try:
             try:
@@ -3222,7 +3270,7 @@ class AvioRequestMixin:
                 return replies
             loop = asyncio.get_running_loop()
             give_up = None if budget is None else loop.time() + budget
-            while len(replies) < max(1, max_replies):
+            while len(replies) < max_replies:
                 wait = more_timeout if replies else timeout
                 if give_up is not None:
                     wait = min(wait, give_up - loop.time())

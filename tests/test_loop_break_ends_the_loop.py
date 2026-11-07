@@ -34,6 +34,7 @@ async def test_the_loop_follows_the_signal(monkeypatch, loop, first, prefix, sig
         device_id="cam-test",
         _keepalive_rtsp_url="rtsp://127.0.0.1:1/test",
         generate_webrtc_peer_id=lambda **kw: "peer-test",
+        _dtls_session_pacer=client.ReconnectPacer(30.0, 45.0),
     )
     calls = []
 

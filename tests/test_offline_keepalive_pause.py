@@ -20,6 +20,7 @@ def _stub(online: bool, explicit: bool, streaming: bool = True) -> SimpleNamespa
     s.status.online = online
     if explicit:
         s._cloud_online_explicit = True
+    s._chunked_wait = CameraMixin._chunked_wait.__get__(s)
     return s
 
 

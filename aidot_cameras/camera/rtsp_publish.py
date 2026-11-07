@@ -51,7 +51,7 @@ from .aac_track import (
     aac_fmtp,
     make_aac_track,
 )
-from .protocol import is_resent_video_frame
+from .protocol import _repeat_log_level, is_resent_video_frame
 from .agc import (  # re-exported: the publishers' callers and tests use these names here
     AlawAgc as AlawAgc,
     _alaw_encode as _alaw_encode,
@@ -133,16 +133,6 @@ def direct_publish_enabled(stream_settings=None) -> bool:
 def is_publishable_url(url: Optional[str]) -> bool:
     """Only ``rtsp://`` / ``rtsps://``-less plain RTSP destinations are published."""
     return bool(url) and str(url).lower().startswith("rtsp://")
-
-
-def _gap_log_level(gaps_before: int) -> int:
-    """WARNING for a session's first gap, DEBUG for the rest.
-
-    A camera that sends gappy video (the A000088 family does, fleet-wide and
-    not fixable here) produced about a hundred of these a day. One per session
-    says the same thing; the rest are for a DEBUG log.
-    """
-    return logging.WARNING if gaps_before == 0 else logging.DEBUG
 
 
 def _publish_gap_warn_s() -> float:
@@ -433,9 +423,7 @@ class RtpTimeline:
             self._anchor = now
             self._window.append((now, 0.0, 0.0))
         elif in_ts != self._last_in:
-            d = (in_ts - self._last_in) & 0xFFFFFFFF
-            if d >= 0x80000000:
-                d -= 0x100000000
+            d = _signed32(in_ts - self._last_in)
             by_arrival = max(1, round((now - self._last_arrival) * self.clock_rate))
             if self.policy == "steered":
                 step = self._steer(d, now)
@@ -1017,10 +1005,10 @@ class FrameGaps:
         self._gap_skipped = 0
         self._gap_dropped = 0
 
-    def arrived(self, now: float) -> None:
+    def arrived(self) -> None:
         """A frame came off the queue (published or not)."""
         if self._first_arrival is None:
-            self._first_arrival = now
+            self._first_arrival = time.monotonic()
 
     def skipped(self) -> None:
         """A frame was dropped while waiting for the first keyframe."""
@@ -1036,8 +1024,9 @@ class FrameGaps:
         """Time spent inside a send that belongs to the current gap."""
         self._blocked += seconds
 
-    def published(self, now: float, send_s: float, queued: int) -> None:
-        """A frame was published at ``now``; its own send took ``send_s``."""
+    def published(self, now: float, send_s: float, queue=None) -> None:
+        """A frame was published at ``now``; its own send took ``send_s``.
+        ``queue`` is the frame queue, sized only for a gap warning."""
         last = self._last_frame
         if last is not None:
             gap = now - last
@@ -1046,8 +1035,11 @@ class FrameGaps:
             if self._warn_s and gap >= self._warn_s:
                 idle = max(0.0, (self._first_arrival or now) - last)
                 self.count += 1
+                # WARNING for a session's first gap, DEBUG for the rest: a
+                # camera that sends gappy video (the A000088 family does,
+                # fleet-wide and not fixable here) says the same thing all day.
                 _LOGGER.log(
-                    _gap_log_level(self.count - 1),
+                    _repeat_log_level(self.count - 1, loud=logging.WARNING),
                     "camera %s: %s: %.2f s without a"
                     " frame to publish (queue %d; %.2f s idle waiting"
                     " for one to arrive, %.2f s inside the publish,"
@@ -1056,7 +1048,7 @@ class FrameGaps:
                     self._device_id,
                     self._label,
                     gap,
-                    queued,
+                    queue.qsize() if queue is not None else 0,
                     idle,
                     self._blocked,
                     self._gap_skipped,
@@ -1103,9 +1095,10 @@ class PublishSink:
       first frame);
     * the AAC stats and the end-of-publish summary.
 
-    ``quiet_send_errors``: the SDES publisher's loop learns that the publish
-    ended from ``pub.alive``; the DTLS one from the exception, so for it a
-    failed AAC send raises (and the TS is not fed that frame).
+    A failed AAC send is not raised: the publisher has marked itself dead, and
+    both publishers' loops end the publish on ``pub.alive`` (or on the next
+    send of their own, which fails the same way). The rest of that batch is
+    not sent, and the TS is not fed the frame that did not go out.
     """
 
     def __init__(
@@ -1114,12 +1107,10 @@ class PublishSink:
         *,
         ts_session=None,
         video_clock_rate: int = 90000,
-        quiet_send_errors: bool = False,
     ) -> None:
         self.device_id = device_id
         self.ts_session = ts_session
         self.video_clock_rate = video_clock_rate
-        self._quiet = quiet_send_errors
         self.aac: Optional[AacTrack] = None
         self.aac_track: Optional[PublishTrack] = None
         self.aac_seconds = 0.0
@@ -1199,8 +1190,7 @@ class PublishSink:
                     track, build_rtp(track.pt, True, seq, ts, aac.ssrc, payload)
                 )
             except RtspPublishError:
-                if not self._quiet:
-                    raise
+                return  # the publisher is dead; its loop ends the publish
             if self.ts_session is not None:
                 # Samples since the track's first frame, unwrapped (its first
                 # timestamp is random), minus the 4-byte RFC 3640 AU header.
@@ -1327,15 +1317,24 @@ class LoopbackRtpPublisher:
         # The track itself is built on the worker (_setup_aac): this runs on
         # the caller's event loop, and the first one imports av and numpy and
         # opens a codec.
+        # Per audio track: the table converting each other G.711 law on the
+        # wire to the one announced, by the wire's payload type.
+        self._law_by_idx: dict = {
+            i: {
+                wire: table
+                for (wire, announced), table in _G711_CONVERT.items()
+                if announced == t.pt
+            }
+            for i, t in enumerate(self._tracks)
+            if t.kind == "audio"
+        }
         self._pcma_idx = next(
             (i for i, t in enumerate(self._tracks) if t.codec == "PCMA"), None
         )
         # The AAC track, the video media clock it follows and the in-sync
         # HLS TS, shared with the DTLS publisher (see PublishSink). The video
         # clock rate comes from the video timeline itself rather than a
-        # literal 90000, in case a future SDP ever names a different one. A
-        # failed AAC send is left to the loop's alive check, as a failed
-        # media send is.
+        # literal 90000, in case a future SDP ever names a different one.
         self._sink = PublishSink(
             device_id,
             ts_session=ts_session,
@@ -1347,7 +1346,6 @@ class LoopbackRtpPublisher:
                 ),
                 90000,
             ),
-            quiet_send_errors=True,
         )
         self._publish_tracks = list(self._tracks)
         self._publisher_factory = publisher_factory
@@ -1645,11 +1643,7 @@ class LoopbackRtpPublisher:
             # when no packet has been seen yet, and the bridge stamps TUTK-framed
             # audio as PCMA whatever the answer said. The type on the wire wins:
             # a packet of the other G.711 law is converted, not dropped.
-            law = (
-                _G711_CONVERT.get((pt, self._tracks[idx].pt))
-                if self._tracks[idx].kind == "audio"
-                else None
-            )
+            law = self._law_by_idx.get(idx, {}).get(pt)
             if law is None:
                 self.dropped_pt += 1
                 return
@@ -1742,10 +1736,7 @@ class LoopbackRtpPublisher:
                     # cached verdict, so a multi-packet re-send run is
                     # counted once, not per packet.
                     if dedup["last_raw"] is not None and ts != dedup["last_raw"]:
-                        d = (ts - dedup["last_raw"]) & 0xFFFFFFFF
-                        if d >= 0x80000000:
-                            d -= 0x100000000
-                        new_pos = dedup["unwrapped"] + d
+                        new_pos = dedup["unwrapped"] + _signed32(ts - dedup["last_raw"])
                     else:
                         new_pos = dedup["unwrapped"]
                     hw = dedup["state"].get("hw")
@@ -1959,7 +1950,7 @@ def dtls_rtp_publish_run(
                 except _queue.Empty:
                     break
                 moved = True
-                gaps.arrived(time.monotonic())
+                gaps.arrived()
                 if not vstarted:
                     if not kf:
                         gaps.skipped()
@@ -1979,7 +1970,7 @@ def dtls_rtp_publish_run(
                 sent_in = time.monotonic() - now
                 if seq_ts is not None:
                     sink.tee_video(data, sink.video_published(seq_ts), kf)
-                    gaps.published(now, sent_in, vq.qsize())
+                    gaps.published(now, sent_in, vq)
                     progress[0] = now
             while True:
                 try:

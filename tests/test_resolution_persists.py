@@ -18,7 +18,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from aidot_cameras.camera.constants import _STREAM_QUALITY, SETSTREAMCTRL_CMD
+from aidot_cameras.camera.constants import (
+    _STREAM_QUALITY,
+    IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ as SETSTREAMCTRL_CMD,
+)
 from aidot_cameras.camera.controls import _CameraControlsMixin
 
 

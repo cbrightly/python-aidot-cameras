@@ -865,8 +865,7 @@ def test_a_video_less_session_does_not_also_escalate_the_open_pacer(
     video-less session no longer counts as an open failure too."""
     run = _real_cycle_run(monkeypatch, make_camera_device_client, False)
     # A short-session wait of a few ms of real time instead of 30 s.
-    monkeypatch.setattr(cc, "_SHORT_SESSION_BASE_S", 0.01)
-    monkeypatch.setattr(cc, "_SHORT_SESSION_CAP_S", 0.02)
+    run.client._dtls_session_pacer = ReconnectPacer(0.01, 0.02)
     from tests.keepalive_driver import FakeDtlsSession
 
     outcomes = [FakeDtlsSession(), AidotNegotiationFailed("bad answer")]

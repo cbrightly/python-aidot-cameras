@@ -209,3 +209,27 @@ async def test_dispatch_does_not_block_the_bridge_thread():
     started = loop.time()
     await asyncio.to_thread(router.dispatch, _frame(SETSTREAMCTRL_RESP, b"\xaa"))
     assert loop.time() - started < 0.5
+
+
+async def test_a_collector_holds_at_most_max_replies():
+    """Delivered on the loop at once, and bounded: a reply past what the
+    reader will take is dropped rather than queued."""
+    router = AvioResponseRouter()
+    pages = router.collect(0x0321, max_replies=2)
+    for seq in (1, 2, 3):
+        router.dispatch(_frame(0x0321, bytes([seq]), seq=seq))
+    got = [await pages.next(0.05) for _ in range(3)]
+    pages.cancel()
+    assert [r.payload for r in got[:2]] == [b"\x01", b"\x02"]
+    assert got[2] is None
+
+
+async def test_a_collector_takes_replies_from_the_bridge_thread():
+    router = AvioResponseRouter()
+    pages = router.collect(0x0321)
+    t = threading.Thread(target=router.dispatch, args=(_frame(0x0321, b"x"),))
+    t.start()
+    t.join()
+    resp = await pages.next(1.0)
+    pages.cancel()
+    assert resp is not None and resp.payload == b"x"
