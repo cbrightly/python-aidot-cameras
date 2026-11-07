@@ -6804,25 +6804,25 @@ class CameraMixin(
         return "auto"
 
     def _resolve_sdes_skip_turn(self) -> bool:
-        """Skip the SDES TURN relay pre-allocation? Decided by the connection
+        """Skip the SDES TURN relay allocation? Decided by the connection
         mode alone (``lan`` skips it, ``relay`` and ``auto`` keep it).
 
-        Before building the offer the SDES path does two synchronous RFC-5766
-        Allocate round-trips (audio + video) to the cloud TURN server so the
-        offer's c=/m= can carry a relay address - ~2-3 s of cold-start latency
-        a LAN-direct camera never uses.
+        ``auto`` allocates once after webrtcReq and trickles the relay
+        candidate; ``relay`` allocates before the offer so its c=/m= can carry
+        the relay address.  Either is a TURN round-trip to the cloud a
+        LAN-direct camera never uses.
 
         NEVER skipped for a battery camera, whatever the mode says: a battery
         camera sleeps and is woken through the cloud, so it is reached over the
         TURN relay rather than a host-direct LAN path. Skipping the relay
-        pre-allocation there means the camera has no reachable path back and
+        allocation there means the camera has no reachable path back and
         sends no media at all (validated live on an A001513: with the relay it
         streams h264 1280x960, with the skip it serves nothing)."""
         if getattr(self, "is_battery_camera", False):
             return False
         # The connection mode composes here rather than in a parallel path, so
         # everything hanging off this resolver (instrumentation included) sees
-        # one answer.  relay force-keeps the pre-allocation -
+        # one answer.  relay force-keeps the allocation -
         # forcing the relay while skipping its allocation would offer nothing.
         return self._resolve_sdes_connection_mode() == "lan"
 

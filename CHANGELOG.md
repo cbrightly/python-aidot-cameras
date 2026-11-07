@@ -118,6 +118,42 @@ function each, all on default paths.
   ms`), and a failure inside the in-sync HLS TS no longer ends a DTLS
   publish (it never ended an SDES one).
 
+- **The SDES direct publish serves from the camera's answer.** With the
+  answer in hand it launches at the first video packet: it no longer waits
+  the 8 s grace after an abandoned first-media wait (an attempt with no video
+  goes straight to the retry), and the audio wait is decided after the
+  serve is (an H.265 session, which keeps ffmpeg, now gets ffmpeg's 1 s
+  audio wait). Audio still prefers the type seen on the wire: a packet of
+  the other G.711 law than the one announced from the answer (the bridge
+  stamps TUTK-framed audio as PCMA whatever the answer said) is converted
+  instead of dropped, counted as `law_converted` in the publish stats. The
+  ffmpeg serve (H.265, recordings, snapshots) keeps both waits.
+
+- **The SDES bridge starts without waiting for the camera's answer.** The
+  open waited up to 8 s for the `webrtcResp` before starting the bridge, and
+  nothing answered the camera's binding requests while it did. The bridge now
+  starts right after the STUN responder window (kept: it answers the
+  camera's first probes), and an answer that lands later is applied when it
+  does - in the first-media wait, or once the serve is up for a camera that
+  streams before it answers: the camera's SRTP keys and data-channel flag, a
+  nomination from it, its credentials for the bridge's 2.5 s nomination
+  tick, and the off-subnet warning. A camera that refuses (-50002/-50015) is
+  still stopped by the first-media wait's check.
+
+- **One SDES TURN allocation, trickled after the offer.** The open made two
+  blocking TURN Allocates (audio and video, ~2-3 s) before it built the
+  offer. The offer now carries host and srflx candidates; after `webrtcReq`
+  one Allocate on the audio socket (the BUNDLE transport) runs and is
+  trickled as a relay candidate, while the camera works on the offer.
+  Packets the Allocate reads that are not its own (the camera may already be
+  probing) are answered by the STUN window instead of dropped. Connection
+  mode `relay` still allocates both sockets before the offer, since it puts
+  the relay in c=/m=; `lan` still skips the relay, never for a battery
+  camera. The elapsed time is logged as `signaling-wait[...] sdes-turn-alloc`.
+  The NAT hole-punch, including the fallback to the vendor relay host when
+  the cloud sends no TURN entry, is kept and now goes out before the
+  Allocate.
+
 ### Deprecated
 - **`AIDOT_PERSISTENT_MQTT`** is accepted and ignored; set to
   `0`/`false`/`no`/`off` it logs one warning. See above.
