@@ -26,11 +26,13 @@ Pinned here:
   the serve cycle's alone;
 * a video-less session is paced once, as a short session, and does not also
   escalate the open-failure pacer;
-* every failed open is on one pacer, 15 s up to 600 s; an open whose ICE
-  never connected, or a busy refusal, has a floor of AIDOT_BUSY_RETRY_S that
-  no early return cuts; a camera the cloud reports offline waits the cap,
-  ending early once it is back; a not-ready (encoder cold) is an ordinary
-  failed open;
+* failed opens are on one pacer, 15 s up to 600 s, and 0.9-1.0 x 600 s at
+  the cap; an open whose ICE never connected has a floor of
+  AIDOT_BUSY_RETRY_S that no early return cuts; a camera the cloud reports
+  offline waits the cap, ending early once it is back; a busy refusal waits a
+  flat AIDOT_BUSY_RETRY_S and a not-ready gets four 3 s retries, neither
+  moving the pacer; the failed-session count lives on the device, so it
+  survives a dormant serve that a live view restarts;
 * a session's life is measured to when it stopped serving, not past its
   teardown.
 
@@ -516,6 +518,22 @@ def test_the_limit_th_failed_session_in_a_row_goes_dormant(monkeypatch, cam, vid
     assert run.gaps() == [30.0, 45.0, 45.0, 45.0]
 
 
+def test_the_failure_count_survives_a_dormant_serve(monkeypatch, cam):
+    """A live view restarts the dormant serve; a camera still failing goes
+    dormant again after one more failed session, as on main."""
+    _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(6)]).run()
+    run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(6)]).run()
+    assert run.dormant == ["session abandon"]
+    assert len(run.opens) == 1
+
+
+def test_a_good_session_after_a_restart_starts_the_count_again(monkeypatch, cam):
+    _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(6)]).run()
+    run = _Run(monkeypatch, cam, [_Sess(120.0)] + [_Sess(5.0)] * 3).run()
+    assert not run.dormant
+    assert len(run.opens) == 5  # the script ran out on the fifth
+
+
 def test_a_good_session_starts_the_failure_count_again(monkeypatch, cam):
     script = [_Sess(5.0)] * 4 + [_Sess(120.0)] + [_Sess(5.0)] * 4
     run = _Run(monkeypatch, cam, script).run()
@@ -616,11 +634,35 @@ def test_the_ice_floor_survives_an_offline_wait_that_ends_early(monkeypatch, cam
     assert _opened_after(run)[0] == _BUSY
 
 
-def test_a_not_ready_is_an_ordinary_failed_open(monkeypatch, cam):
-    """No fast burst: the pacer's 15 s, then its backoff."""
+def test_a_not_ready_bursts_then_joins_the_backoff(monkeypatch, cam):
+    """Four quick 3 s retries that skip the gate, then the pacer from its
+    base: the burst did not move it."""
     nr = AidotCameraNotReady("cam")
-    run = _Run(monkeypatch, cam, [nr, nr, nr]).run()
-    assert _opened_after(run) == [15.0, 30.0, 60.0]
+    run = _Run(monkeypatch, cam, [nr] * 6).run()
+    assert _opened_after(run) == [3.0, 3.0, 3.0, 3.0, 15.0, 30.0]
+
+
+def test_busy_waits_flat_and_leaves_the_backoff_where_it_was(monkeypatch, cam):
+    """Ten busy refusals in a row each wait AIDOT_BUSY_RETRY_S, whatever the
+    backoff had reached; the next other failure carries on from it."""
+    bad = AidotNegotiationFailed("bad answer")
+    busy = AidotCameraBusy(-50002)
+    run = _Run(monkeypatch, cam, [bad, bad, *([busy] * 10), bad, bad]).run()
+    assert _opened_after(run) == [15.0, 30.0, *([_BUSY] * 10), 60.0, 120.0]
+
+
+@pytest.mark.parametrize("r, at_cap", [(0.0, 540.0), (1.0, 600.0)])
+def test_at_the_cap_the_wait_is_never_under_nine_tenths_of_it(
+    monkeypatch, cam, r, at_cap
+):
+    """A camera that never opens is probed no more often than the fixed
+    600 s slow probe was: from the seventh failure, 540-600 s."""
+    bad = AidotNegotiationFailed("no answer")
+    run = _Run(monkeypatch, cam, [bad] * 10)
+    monkeypatch.setattr(protocol, "random", types.SimpleNamespace(random=lambda: r))
+    run.run()
+    assert _opened_after(run)[6:] == [at_cap] * 4
+    assert min(_opened_after(run)[6:]) >= 0.9 * 600.0
 
 
 def test_the_failed_open_line_goes_quiet_at_the_cap(monkeypatch, cam, caplog):

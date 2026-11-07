@@ -169,18 +169,21 @@ class _FfmpegMissing(RuntimeError):
 _OFFLINE_RECHECK_S = settings.read("AIDOT_OFFLINE_RECHECK_S")
 _OFFLINE_PROBE_S = settings.read("AIDOT_OFFLINE_PROBE_S")
 
-# DTLS serve loop, failed opens: ONE jittered-backoff pacer for every way an
-# open can fail (busy, ICE never connected, encoder not ready, anything else),
-# from 15 s up to a 600 s cap. Two things bend it:
+# DTLS serve loop, failed opens: ONE jittered-backoff pacer for the ways an
+# open fails (ICE never connected, encoder not ready, anything else), from
+# 15 s up to a 600 s cap. Three things bend it:
 #
-# - a floor of AIDOT_BUSY_RETRY_S after a busy refusal or an ICE failure, when
-#   the camera still holds a session and refuses a sooner retry as busy
+# - a floor of AIDOT_BUSY_RETRY_S after an ICE failure, when the camera still
+#   holds the session it accepted and refuses a sooner retry as busy
 #   (2026-11-04, an A000088);
+# - at the cap the wait is 0.9-1.0 x the cap, never less;
 # - a camera the cloud reports offline waits the cap at once, ending early
 #   (never before the floor) if the cloud reports it back.
 #
-# This replaced three mechanisms: a fixed busy retry, a slow probe that widened
-# the interval to 600 s after five failures (an idle-but-cloud-online camera
+# A busy refusal stays on its own flat AIDOT_BUSY_RETRY_S and an encoder still
+# cold gets a short burst of quick retries first; neither moves the pacer.
+# This replaced two mechanisms: a slow probe that widened the interval to
+# 600 s after five failures (an idle-but-cloud-online camera
 # never trips the offline flag, so without a wide cap it retried forever at
 # 300 s, burning an open timeout each time), and the offline pause the SDES and
 # JPEG loops still use. At the cap the per-attempt WARNING drops to an INFO
@@ -216,6 +219,19 @@ def _warn_deprecated_knobs(env: Optional[dict] = None) -> None:
         ", ".join(_set),
         "it" if len(_set) == 1 else "them",
     )
+
+
+#: Quick retries for an encoder still cold (a DC-only answer), and how many.
+_NOT_READY_BURST_S, _NOT_READY_BURST_MAX = 3.0, 4
+
+
+def _not_ready_burst_delay(
+    burst: int, burst_max: int = _NOT_READY_BURST_MAX
+) -> Optional[float]:
+    """The quick retry for the ``burst``-th not-ready answer in a row (from 1),
+    or None once ``burst_max`` are spent: then the caller's own pacing, so a
+    persistently-cold camera is not hammered."""
+    return _NOT_READY_BURST_S if 0 < burst <= burst_max else None
 
 
 def _quiet_pacer_log(failures: int):
@@ -1416,6 +1432,8 @@ class _DtlsServeLoopState:
     _open_gate: "Any" = dataclasses.field(init=False)  # the loop
     _pacer: "Any" = dataclasses.field(init=False)  # the loop
     _last_open_at: "Any" = dataclasses.field(init=False)  # the loop, open_attempt
+    # the loop, open_attempt, prepare_session
+    _not_ready_burst: "Any" = dataclasses.field(init=False)
     # prepare_session, serve_cycle; read by session_end
     _session_video_seen: "Any" = dataclasses.field(init=False)
     # prepare_session, serve_cycle; read by session_end
@@ -1482,33 +1500,64 @@ async def _dtls_serve_loop_open_attempt(
     except asyncio.CancelledError:
         return _PhaseReturn(None)
     except Exception as exc:
-        # Every failed open on one pacer (see _DTLS_RETRY_BASE_S): busy, ICE
-        # never connected, encoder not ready yet (a DC-only answer; it used to
-        # get its own 3 s burst) and the rest. A busy refusal or an ICE failure
-        # sets a floor: the camera accepted the offer and still holds the
-        # session that never connected, and asked again before it lapses it
-        # refuses as busy, which is what every retry did on 2026-11-04 (an
-        # A000088, twelve times in twenty minutes). Another viewer holding the
-        # camera's single slot is the same wait.
-        _floor = (
-            settings.read("AIDOT_BUSY_RETRY_S")
-            if isinstance(exc, (AidotCameraBusy, AidotIceNotEstablished))
-            else 0.0
-        )
+        # Failed opens are paced on one pacer (see _DTLS_RETRY_BASE_S), with
+        # two exceptions that leave it untouched. A busy refusal (another
+        # viewer holds the camera's single slot) waits a flat
+        # AIDOT_BUSY_RETRY_S, so the serve comes back within that of the slot
+        # freeing. An encoder still cold (a DC-only answer) gets a short burst
+        # of quick retries first (_not_ready_burst_delay).
         _offline = _cloud_reports_offline(self)
-        _delay = max(ps._pacer.fail_delay(), _floor)
-        _n = ps._pacer.attempt
-        _at_cap = _DTLS_RETRY_BASE_S * 2 ** min(_n - 1, 30) >= _DTLS_RETRY_CAP_S
-        if _offline:
-            # Gone, says the cloud: the cap at once, cut short (never before
-            # the floor) if the cloud reports it back.
-            _delay = max(_delay, _DTLS_RETRY_CAP_S)
-        if _offline or _at_cap:
-            _log = _quiet_pacer_log(_n)
-        elif isinstance(exc, AidotCameraNotReady):
+        _busy_s = settings.read("AIDOT_BUSY_RETRY_S")
+        _floor = 0.0
+        _burst = None
+        if isinstance(exc, AidotCameraNotReady):
+            ps._not_ready_burst += 1
+            _burst = _not_ready_burst_delay(ps._not_ready_burst)
+        _quiet = False
+        if isinstance(exc, AidotCameraBusy):
+            _offline = False  # it answered
+            _delay = _floor = _busy_s
+            _log = _LOGGER.warning
+        elif _burst is not None:
+            _offline = False  # it answered
+            _delay = _burst
+            ps._last_open_at = 0.0  # the burst does not wait out the gate
             _log = _LOGGER.info  # an encoder warming up, not a fault
         else:
-            _log = _LOGGER.warning
+            if isinstance(exc, AidotIceNotEstablished):
+                # The camera accepted the offer and still holds the session
+                # that never connected; asked again before it lapses it
+                # refuses as busy, which is what every retry did on 2026-11-04
+                # (an A000088, twelve times in twenty minutes). A floor, which
+                # the early end of an offline wait does not cut short.
+                _floor = _busy_s
+            _delay = ps._pacer.fail_delay()
+            if (
+                _DTLS_RETRY_BASE_S * 2 ** min(ps._pacer.attempt - 1, 30)
+                >= _DTLS_RETRY_CAP_S
+            ):
+                # At the cap: between 0.9 x cap and cap, on the pacer's own
+                # jitter, so a camera that never opens is probed no more often
+                # than the fixed 600 s slow probe this replaced.
+                _quiet = True
+                _delay = _DTLS_RETRY_CAP_S * (
+                    0.9
+                    + 0.1
+                    * (_delay - _DTLS_RETRY_BASE_S)
+                    / (_DTLS_RETRY_CAP_S - _DTLS_RETRY_BASE_S)
+                )
+            _delay = max(_delay, _floor)
+            if _offline:
+                # Gone, says the cloud: the cap at once, cut short (never
+                # before the floor) if the cloud reports it back.
+                _delay = max(_delay, _DTLS_RETRY_CAP_S)
+            if _offline or _quiet:
+                _log = _quiet_pacer_log(ps._pacer.attempt)
+            elif isinstance(exc, AidotCameraNotReady):
+                _log = _LOGGER.info
+            else:
+                _log = _LOGGER.warning
+        _n = ps._pacer.attempt
         _log(
             "DTLS serve: open failed for %s (retry %s; %d in a row): %s",
             self.device_id,
@@ -1538,6 +1587,7 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     ``continue``, ``break`` or ``return`` of the loop, else None.
     """
     ps._pacer.reset()
+    ps._not_ready_burst = 0  # clean open: the encoder is warm
     # When the session began, for _session_end_wait: from the open's success,
     # not its start, so a slow open cannot carry a dying session past the
     # short-session threshold.
@@ -7013,16 +7063,16 @@ class CameraMixin(
     ) -> "tuple[float, bool]":
         """``(delay, is_fast_retry)`` for a wake-readiness retry.
 
-        A 3 s fast retry for the first ``burst_max`` failures.  Returns
+        The DTLS serve loop's quick retry (_not_ready_burst_delay) for the first
+        ``burst_max`` failures.  Returns
         ``(0.0, False)`` when the counter is 0 (not a wake-readiness failure) and
         ``(15.0, False)`` once the burst is spent, in both cases handing the
         decision back to the caller's normal pacer.
         """
         if burst <= 0:
             return (0.0, False)
-        if burst <= burst_max:
-            return (3.0, True)
-        return (15.0, False)
+        delay = _not_ready_burst_delay(burst, burst_max)
+        return (delay, True) if delay is not None else (15.0, False)
 
     def _maybe_start_serve_relay(
         self, serve_url: Optional[str]
@@ -7125,8 +7175,16 @@ class CameraMixin(
         # Sessions that connect and then fail: their own pacer, which also
         # decides when to stop reopening (_session_end_wait).
         ps._pacer = ReconnectPacer(_DTLS_RETRY_BASE_S, _DTLS_RETRY_CAP_S)
-        ps._session_pacer = ReconnectPacer(_SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S)
+        # On the device, not the serve: the failure count survives a dormant
+        # serve that a live view restarts, so a camera still failing goes
+        # dormant again after one more failed session, not five.
+        _sp = getattr(self, "_dtls_session_pacer", None)
+        if _sp is None:
+            _sp = ReconnectPacer(_SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S)
+            self._dtls_session_pacer = _sp
+        ps._session_pacer = _sp
         ps._last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
+        ps._not_ready_burst = 0  # not-ready answers in a row (encoder cold)
         ps.loop = asyncio.get_running_loop()
         _warn_deprecated_knobs()
         while self._streaming_active:
