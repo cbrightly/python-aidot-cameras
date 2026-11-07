@@ -1924,14 +1924,19 @@ def _stun_attr(attr_type: int, value: bytes) -> bytes:
     )
 
 
+#: How many packets the TURN allocate keeps for the STUN responder.
+_TURN_STRAY_CAP = 32
+
+
 def turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass, stray=None):
     """RFC 5766 TURN relay allocation with long-term credential auth.
     Returns (relay_ip, relay_port, realm, nonce) or None on failure.
 
     It reads the media socket itself.  After webrtcReq the camera's binding
-    requests can land there too, so every packet that is not this
-    allocation's response is appended to ``stray`` as ``(packet, source)``
-    for the STUN responder to answer, rather than dropped."""
+    requests can land there too, so a STUN packet (magic cookie) that is not
+    this allocation's response is appended to ``stray`` as
+    ``(packet, source)`` for the STUN responder to answer, up to
+    ``_TURN_STRAY_CAP`` of them. Anything else is dropped."""
     import hashlib as _ha
     import hmac as _hm
     import struct as _st_ta
@@ -1939,6 +1944,14 @@ def turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass, stray=No
     import time as _tm_ta
 
     _MAGIC_TA = b"\x21\x12\xa4\x42"
+
+    def _keep_stray(_pkt, _src):
+        if (
+            stray is not None
+            and len(stray) < _TURN_STRAY_CAP
+            and _pkt[4:8] == _MAGIC_TA
+        ):
+            stray.append((_pkt, _src))
 
     def _stun_message_integrity(_k, _m):
         # Patch Length to include the MI attribute (4 hdr + 20 digest = 24)
@@ -1971,8 +1984,7 @@ def turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass, stray=No
         if len(_cand1) >= 20 and _cand1[8:20] == _tid1:
             _rsp1 = _cand1
             break
-        if stray is not None:
-            stray.append((_cand1, _src1))
+        _keep_stray(_cand1, _src1)
     if _rsp1 is None:
         return None
     _realm_ta = _nonce_ta = b""
@@ -2033,8 +2045,7 @@ def turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass, stray=No
         if len(_cand2) >= 20 and _cand2[8:20] == _tid2:
             _rsp2 = _cand2
             break
-        if stray is not None:
-            stray.append((_cand2, _src2))
+        _keep_stray(_cand2, _src2)
     if _rsp2 is None:
         return None
     if _rsp2[:2] != b"\x01\x03":  # Allocate Success = 0x0103
