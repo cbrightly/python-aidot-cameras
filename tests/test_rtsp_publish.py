@@ -1606,10 +1606,11 @@ def test_the_open_passes_the_plain_rtp_decision_through():
     assert "_use_plain_rtp" in names_in(args[3]) and "_keep_v" in names_in(args[4])
 
 
-def test_both_sdes_serve_launches_go_through_the_spawn_helper():
-    """The first launch AND the SRTP key-change relaunch both use
-    ``_spawn_serve`` - a raw ``subprocess.Popen`` left at either site would
-    silently bring ffmpeg back with direct publish on - and the helper reads
+def test_the_sdes_serve_launch_goes_through_the_spawn_helper():
+    """The serve launches once, through ``_spawn_serve`` (the SRTP key-change
+    relaunch is gone: the bridge decrypts with a later key in place) - a raw
+    ``subprocess.Popen`` would silently bring ffmpeg back with direct publish
+    on - and the helper reads
     the SDP through the executor, never with a blocking open() on the loop."""
     import ast
 
@@ -1628,7 +1629,7 @@ def test_both_sdes_serve_launches_go_through_the_spawn_helper():
         for n in ast.walk(fn)
         if isinstance(n, ast.Await) and name_of(n.value) == "_spawn_serve"
     ]
-    assert len(launches) == 2
+    assert len(launches) == 1
     spawn = function(module_tree("aidot_cameras.camera.sdes_open"), "_spawn_serve")
     assert calls_to(spawn, "LoopbackRtpPublisher") and calls_to(spawn, "Popen")
     popens = [c for fn in family for c in calls_to(fn, "Popen")]

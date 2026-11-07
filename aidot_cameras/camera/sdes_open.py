@@ -6021,7 +6021,6 @@ class _SdesOpenState:
     device_id: "str"
     outgoing_q: "Any"
     answer_fut: "Any"
-    camera_offer_fut: "Any"
     _status: "Any"
     liveplay_echo_ev: "Any"
     liveplay_resp_fut: "Any"
@@ -7787,7 +7786,6 @@ class _SdesOpenMixin:
             device_id=device_id,
             outgoing_q=outgoing_q,
             answer_fut=answer_fut,
-            camera_offer_fut=camera_offer_fut,
             _status=_status,
             liveplay_echo_ev=liveplay_echo_ev,
             liveplay_resp_fut=liveplay_resp_fut,

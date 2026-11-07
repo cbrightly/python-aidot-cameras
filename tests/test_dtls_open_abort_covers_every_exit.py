@@ -147,17 +147,3 @@ def test_the_media_declined_exit_goes_through_the_abort():
     assert not [c for c in calls_to(body, "close") if name_of(c.func.value) == "pc"], (
         "no second hand-rolled teardown"
     )
-
-
-def test_the_sdes_to_dtls_fallback_carries_the_holder():
-    fn = _impl_function()
-    calls = [
-        n
-        for n in ast.walk(fn)
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "_async_open_webrtc_stream_impl"
-    ]
-    assert calls, "expected the SDES->DTLS fallback to re-enter the impl"
-    for call in calls:
-        assert any(k.arg == "_abort_holder" for k in call.keywords)
