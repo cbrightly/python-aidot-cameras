@@ -1,11 +1,14 @@
-"""Unit tests for the persistent-MQTT flag wiring (Phase 1).
+"""Unit tests for the persistent MQTT connection, the only MQTT transport.
 
-Locks the opt/env precedence of ``_resolve_persistent_mqtt`` (per-camera kwarg
-wins over AIDOT_PERSISTENT_MQTT env, default off) and the basic reuse semantics
-of the ``_PersistentMqtt`` collector routing. The live connection behaviour is
+``AIDOT_PERSISTENT_MQTT`` used to switch it off in favour of a connection per
+operation. That path connected with the account's one clientId and so evicted
+the persistent connection; it is gone, and the knob is accepted, ignored and
+warned about once. Also locks the basic reuse semantics of the
+``_PersistentMqtt`` collector routing. The live connection behaviour is
 validated on hardware, not here.
 """
 
+import logging
 import os
 import sys
 
@@ -14,41 +17,40 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aidot_cameras.camera.client as cc
 from aidot_cameras.camera.protocol import _PersistentMqtt
 
-_CAM = next(
-    v
-    for v in vars(cc).values()
-    if isinstance(v, type) and "_resolve_persistent_mqtt" in v.__dict__
-)
+
+def _warnings(caplog):
+    return [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "AIDOT_PERSISTENT_MQTT" in r.getMessage()
+    ]
 
 
-def _cam():
-    return _CAM.__new__(_CAM)
+def test_turning_the_knob_off_warns_once_and_changes_nothing(monkeypatch, caplog):
+    monkeypatch.setattr(cc, "_PERSISTENT_MQTT_KNOB_WARNED", False)
+    monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", "0")
+    with caplog.at_level(logging.WARNING):
+        cc._warn_persistent_mqtt_knob()
+        cc._warn_persistent_mqtt_knob()
+    assert len(_warnings(caplog)) == 1
 
 
-def test_default_on(monkeypatch):
-    # default ON (matches the app's single persistent connection)
-    monkeypatch.delenv("AIDOT_PERSISTENT_MQTT", raising=False)
-    assert _cam()._resolve_persistent_mqtt() is True
+def test_the_knob_left_on_or_unset_says_nothing(monkeypatch, caplog):
+    monkeypatch.setattr(cc, "_PERSISTENT_MQTT_KNOB_WARNED", False)
+    with caplog.at_level(logging.WARNING):
+        monkeypatch.delenv("AIDOT_PERSISTENT_MQTT", raising=False)
+        cc._warn_persistent_mqtt_knob()
+        for val in ("1", "true", "on", "anything"):
+            monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", val)
+            cc._warn_persistent_mqtt_knob()
+    assert _warnings(caplog) == []
 
 
-def test_env_disables(monkeypatch):
-    for val in ("0", "false", "FALSE", "no", "off", " Off "):
-        monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", val)
-        assert _cam()._resolve_persistent_mqtt() is False, val
-
-
-def test_env_truthy_or_unknown_stays_on(monkeypatch):
-    for val in ("1", "true", "yes", "on", "anything"):
-        monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", val)
-        assert _cam()._resolve_persistent_mqtt() is True, val
-
-
-def test_kwarg_off_wins_over_default(monkeypatch):
-    # an explicit opt=False (e.g. user turned the HA toggle off) overrides default-on
-    monkeypatch.delenv("AIDOT_PERSISTENT_MQTT", raising=False)
-    cam = _cam()
-    cam._persistent_mqtt_opt = False
-    assert cam._resolve_persistent_mqtt() is False
+def test_there_is_no_switch_left_to_read():
+    # The resolver and the per-operation session it chose are gone.
+    cam_classes = [v for v in vars(cc).values() if isinstance(v, type)]
+    assert not any("_resolve_persistent_mqtt" in c.__dict__ for c in cam_classes)
+    assert not hasattr(cc, "_mqtt_session_with_status")
 
 
 def test_collector_routing_fans_out_messages():

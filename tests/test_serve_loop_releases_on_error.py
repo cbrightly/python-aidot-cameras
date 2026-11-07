@@ -8,12 +8,10 @@ the smaller fixes that shipped with it.
 import asyncio
 import queue
 import threading
-import time
 
 import pytest
 
 import aidot_cameras.camera.client as camera_client
-import aidot_cameras.camera.protocol as proto
 import aidot_cameras.camera.sdes_open as sdes_open
 from aidot_cameras.camera import rtsp_publish
 from aidot_cameras.camera.client import CameraMixin, _FfmpegMissing
@@ -21,8 +19,6 @@ from aidot_cameras.camera.controls import (
     LIGHT_BRIGHTNESS_MIN,
     _CameraControlsMixin,
 )
-
-from test_mqtt_session_reconnect import _FakeMsg, _install_fake_client
 
 
 def _dormant_candidate():
@@ -307,64 +303,3 @@ async def test_floodlight_brightness_clamps_to_the_documented_floor():
 
     assert await _Cam().async_set_floodlight(on=True, brightness=5)
     assert ("Dimming", LIGHT_BRIGHTNESS_MIN) in sent
-
-
-def test_mqtt_session_does_not_hoard_messages_it_hands_to_a_handler(monkeypatch):
-    outgoing = queue.Queue()
-    seen = []
-
-    def driver(c):
-        c.on_connect(c, None, {}, 0)
-        for i in range(5):
-            c.on_message(c, None, _FakeMsg("t/a", f"m{i}".encode()))
-        time.sleep(0.05)
-        outgoing.put_nowait(None)
-
-    _install_fake_client(monkeypatch, driver)
-    messages, _status = proto._mqtt_session_sync(
-        "wss://broker.example/mqtt",
-        "u",
-        "p",
-        "cid",
-        ["t/a"],
-        [],
-        5.0,
-        outgoing_queue=outgoing,
-        on_message=lambda t, p: seen.append((t, p)),
-    )
-    assert len(seen) == 5
-    assert messages == []
-
-
-def test_mqtt_session_publishes_while_the_inbox_is_busy(monkeypatch):
-    """Outgoing publishes used to be drained only when no message was waiting."""
-    outgoing = queue.Queue()
-    published = []
-
-    def driver(c):
-        c.on_connect(c, None, {}, 0)
-        orig_publish = c.publish
-
-        def _pub(topic, payload, *a, **k):
-            published.append(topic)
-            return orig_publish(topic, payload, *a, **k)
-
-        c.publish = _pub
-        outgoing.put_nowait(("out/1", "x"))
-        for i in range(50):
-            c.on_message(c, None, _FakeMsg("t/a", b"m"))
-        time.sleep(0.05)
-        outgoing.put_nowait(None)
-
-    _install_fake_client(monkeypatch, driver)
-    proto._mqtt_session_sync(
-        "wss://broker.example/mqtt",
-        "u",
-        "p",
-        "cid",
-        ["t/a"],
-        [],
-        5.0,
-        outgoing_queue=outgoing,
-    )
-    assert "out/1" in published

@@ -288,7 +288,7 @@ KNOBS: "dict[str, Knob]" = _registry(
         note="auto | lan | relay; anything else is auto",
     ),
     Knob("AIDOT_SDES_VIDEO_PT", "96", "str", note="sdes_open.py parses 96 | 97 | none"),
-    Knob("AIDOT_PERSISTENT_MQTT", True, "bool_on"),
+    Knob("AIDOT_PERSISTENT_MQTT", True, "bool_on", note="deprecated; ignored"),
     Knob("AIDOT_DIRECT_PUBLISH", True, "bool_on"),
     Knob("AIDOT_PUBLISH_AAC", True, "bool_on"),
     Knob("AIDOT_HLS_DIRECT_TS", True, "bool_on"),

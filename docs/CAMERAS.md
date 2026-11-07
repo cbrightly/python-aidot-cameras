@@ -182,7 +182,7 @@ An adaptive "fast first, then patient" keepalive strategy and a separate
 skip-TURN switch were tried here and removed in 1.0.0rc44: the fast failure
 cost ~40 s against a ~7 s saving, and the connection mode covers the LAN case.
 
-### Connection reuse (`AIDOT_PERSISTENT_MQTT`, on by default)
+### Connection reuse (one persistent MQTT connection)
 
 Historically every device command, attribute fetch, and **stream open** opened
 and tore down its own cloud MQTT WebSocket. The official app instead keeps ONE
@@ -193,9 +193,15 @@ only be one), subscribes once, replays subscriptions on reconnect, and carries
 commands, attributes, AND the stream-open signaling - without tearing down on
 stream stop. This removes the per-open connect churn that otherwise rate-limits
 the cloud account; live 7-camera soaks showed SDES `NO_MEDIA` dropping from
-~57 % to ~11-19 % with the flag on. On by default; disable with `AIDOT_PERSISTENT_MQTT`
-in `{0,false,no,off}` or per-camera `_persistent_mqtt_opt=False` (the explicit opt
-always wins).
+~57 % to ~11-19 % with it.
+
+It is the only MQTT transport. The per-operation connection, and the fallback
+to it when the shared connection failed, connected with the same `client_id`,
+so the broker evicted the shared connection every time it ran; both are gone.
+An operation that finds no shared connection reports failure instead.
+`AIDOT_PERSISTENT_MQTT`, which used to turn the shared connection off, is still
+accepted and ignored; set to `0`/`false`/`no`/`off` it logs one deprecation
+warning.
 
 **Persisting `login_info` yourself?** This connection (and its guarding lock)
 live on the same `login_info` dict `AidotClient` hands you - a live

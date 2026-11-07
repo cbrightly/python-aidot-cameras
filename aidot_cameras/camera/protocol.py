@@ -181,13 +181,6 @@ def _build_stun_binding_success_response(
 
 _WEBRTC_TERMINAL_ACK_CODES = (-50002, -50015)
 
-# If a post-connect MQTT drop stays disconnected longer than this (seconds) with
-# no successful paho reconnect, the receive loop ends the session rather than
-# polling a dead socket until the full duration deadline.  Long enough to ride
-# out an ordinary network blip + paho's auto-reconnect, short enough that a
-# terminal drop (session taken over, revoked creds, broker gone) fails fast.
-_MQTT_RECONNECT_GRACE = 20.0
-
 
 def _terminal_webrtc_ack(msg: dict):
     """Return ``(code, desc)`` if ``msg`` is a webrtcResp carrying a TERMINAL ack
@@ -2183,276 +2176,6 @@ def _h264_has_keyframe(data: bytes) -> bool:
     return False
 
 
-def _mqtt_session_sync(
-    mqtt_url: str,
-    mqtt_user: str,
-    mqtt_pwd: str,
-    client_id: str,
-    subscribe_topics: list,
-    publish_items: list,
-    duration: float,
-    on_message=None,
-    ws_path: str = "/mqtt",
-    on_ready=None,
-    outgoing_queue=None,
-) -> tuple:
-    """Synchronous paho MQTT session (runs in a thread executor).
-
-    Returns (messages, status_dict) where:
-      messages    = list of (topic, payload_str) tuples received
-      status_dict = {"connected": bool, "rc": int, "rc_str": str,
-                     "error": str|None, "log": [str, ...]}
-
-    ws_path overrides the WebSocket endpoint path (default "/mqtt").
-    Pass "" or "/" to try the root path.
-
-    on_ready(status) - optional callback called after all subscribe/publish
-    operations complete but before the receive loop starts.  If it blocks
-    (e.g. waiting for user input) the paho background thread continues to
-    buffer incoming messages.  The ``duration`` countdown starts only after
-    on_ready returns, so use this hook to implement a "wait for ENTER before
-    starting the capture window" pattern.
-    """
-    import paho.mqtt.client as _paho
-    import ssl as _ssl
-    import queue as _queue
-    from urllib.parse import urlparse
-
-    parsed = urlparse(mqtt_url)
-    hostname = parsed.hostname or mqtt_url
-    port = parsed.port or (8443 if parsed.scheme in ("wss", "https") else 1883)
-    tls = parsed.scheme in ("wss", "https", "mqtts")
-    # ws_path parameter takes priority; fall back to URL path then "/mqtt"
-    path = ws_path if ws_path is not None else (parsed.path or "/mqtt")
-    if path == "":
-        path = "/"
-
-    msg_q = _queue.Queue()
-    conn_ev = threading.Event()
-    status = {
-        "connected": False,
-        "rc": None,
-        "rc_str": "",
-        "error": None,
-        "log": [],
-        "disconnected_since": None,
-    }
-
-    # Build client - handle paho >=2.0 (VERSION2) and <2.0
-    try:
-        client = _paho.Client(
-            callback_api_version=_paho.CallbackAPIVersion.VERSION2,
-            client_id=client_id,
-            transport="websockets",
-        )
-    except AttributeError:
-        client = _paho.Client(client_id=client_id, transport="websockets")
-
-    client.ws_set_options(path=path)
-    if mqtt_user:
-        client.username_pw_set(mqtt_user, mqtt_pwd or "")
-    if tls:
-        ctx = _ssl.create_default_context()
-        client.tls_set_context(ctx)
-
-    def _on_connect(c, ud, flags, reason_code, props=None):
-        # paho >=2 passes ReasonCode; paho <2 passes int
-        try:
-            rc = int(reason_code)
-        except (TypeError, ValueError):
-            rc = getattr(reason_code, "value", -1)
-        status["connected"] = rc == 0
-        status["rc"] = rc
-        status["rc_str"] = str(reason_code)
-        if rc == 0:
-            # Successful (re)connect: a prior drop (if any) has recovered, so the
-            # receive loop must not fail it fast - clear the disconnect marker.
-            status["disconnected_since"] = None
-            # (Re)subscribe on EVERY successful connect.  paho's loop_start
-            # auto-reconnects after a transient drop, but with clean_session the
-            # broker retains no subscriptions, so a reconnected client would be
-            # deaf unless they are re-established here rather than only once below.
-            for _sub in subscribe_topics:
-                try:
-                    c.subscribe(_sub)
-                except Exception:
-                    _LOGGER.debug(
-                        "_mqtt_session: resubscribe failed for %s", _sub, exc_info=True
-                    )
-        conn_ev.set()
-
-    def _on_message(c, ud, msg):
-        payload = (
-            msg.payload.decode("utf-8", errors="replace")
-            if isinstance(msg.payload, (bytes, bytearray))
-            else str(msg.payload)
-        )
-        msg_q.put((msg.topic, payload))
-
-    def _on_disconnect(c, ud, *args):
-        # paho >=2 calls (disconnect_flags, reason_code, properties); paho <2
-        # calls (rc,).  Pull the reason code from whichever slot it lands in so
-        # the log is truthful on both (a fixed 5-arg signature put paho 1.x's rc
-        # in disconnect_flags and logged reason_code as None).
-        reason_code = args[1] if len(args) >= 2 else (args[0] if args else None)
-        # If _on_connect was never fired (WebSocket upgrade failed, auth refused
-        # at TCP level, etc.) signal conn_ev now so the caller doesn't time out.
-        if not conn_ev.is_set():
-            # Never connected (WS upgrade failed, auth refused at TCP level, ...):
-            # unblock the caller and end the receive loop - the connect failed.
-            status["connected"] = False
-            status["rc_str"] = f"disconnect-before-connect rc={reason_code}"
-            conn_ev.set()
-            msg_q.put(None)  # sentinel: end the receive loop
-            return
-        # Already connected once: this is (so far) a transient drop.  paho's
-        # loop_start auto-reconnects and _on_connect re-subscribes AND clears
-        # disconnected_since, so a brief blip must NOT tear down a long-lived
-        # stream's signaling (the non-persistent transport runs one session for
-        # the whole stream).  But a drop that never recovers - session taken over
-        # (rc=142) when the account's persistent client reclaims the clientId,
-        # revoked creds, broker gone - would otherwise leave the receive loop
-        # polling a dead socket until the full duration deadline.  Record when the
-        # drop began; the loop ends the session once it has persisted past
-        # _MQTT_RECONNECT_GRACE.  (dict single-key set/get is atomic under the GIL,
-        # so no lock is needed across the paho thread and the receive loop.)
-        if status.get("disconnected_since") is None:
-            status["disconnected_since"] = time.monotonic()
-        _LOGGER.debug(
-            "_mqtt_session: disconnect rc=%s (awaiting paho reconnect)",
-            reason_code,
-        )
-
-    def _on_log(c, ud, level, buf):
-        if len(status["log"]) < 500:
-            status["log"].append(buf)
-        if "assword" not in buf:
-            _LOGGER.debug("paho: %s", buf)
-
-    client.on_connect = _on_connect
-    client.on_message = _on_message
-    client.on_disconnect = _on_disconnect
-    client.on_log = _on_log
-
-    import time as _time
-
-    try:
-        client.connect(hostname, port, keepalive=60)
-    except Exception as exc:
-        status["error"] = str(exc)
-        _LOGGER.warning("_mqtt_session: connect() raised: %s", exc)
-        return [], status
-
-    client.loop_start()
-
-    if not conn_ev.wait(timeout=15):
-        status["error"] = f"connect timeout to {hostname}:{port}"
-        _LOGGER.warning("_mqtt_session: %s", status["error"])
-        client.loop_stop()
-        try:
-            client.disconnect()
-        except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
-        return [], status
-
-    if not status["connected"]:
-        _LOGGER.warning(
-            "_mqtt_session: broker refused rc=%s (%s) for %s:%d",
-            status["rc"],
-            status["rc_str"],
-            hostname,
-            port,
-        )
-        client.loop_stop()
-        try:
-            client.disconnect()
-        except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
-        return [], status
-
-    _LOGGER.info(
-        "_mqtt_session: connected to %s:%d clientId=%s", hostname, port, client_id
-    )
-
-    # Subscriptions are (re)established in _on_connect so they survive a paho
-    # auto-reconnect; nothing to subscribe here.
-    _LOGGER.debug("_mqtt_session: subscribed (in on_connect) %s", subscribe_topics)
-
-    for pub_topic, pub_payload in publish_items:
-        client.publish(pub_topic, pub_payload)
-        _LOGGER.debug("_mqtt_session: published %s", pub_topic)
-
-    if on_ready:
-        try:
-            on_ready(status)
-        except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
-
-    collected = []
-    deadline = _time.monotonic() + duration
-    while True:
-        remaining = deadline - _time.monotonic()
-        if remaining <= 0:
-            break
-        # End the session if a post-connect drop never recovered: a terminal
-        # disconnect delivers no further messages, so without this the loop would
-        # poll a dead socket (and the caller's camera signaling would silently
-        # stall) until the full duration deadline.
-        _ds = status.get("disconnected_since")
-        if _ds is not None and (_time.monotonic() - _ds) > _MQTT_RECONNECT_GRACE:
-            _LOGGER.warning(
-                "_mqtt_session: MQTT disconnected >%.0fs with no reconnect "
-                "(rc=%s) - ending session; camera signaling can no longer arrive",
-                _MQTT_RECONNECT_GRACE,
-                status.get("rc_str"),
-            )
-            break
-        # Drain the outgoing publishes on every pass, not only when the inbox
-        # is empty: a busy account (every camera's signaling and events arrive
-        # on the wildcard subscriptions) used to starve our own sends.
-        if outgoing_queue is not None:
-            while True:
-                try:
-                    out = outgoing_queue.get_nowait()
-                except _queue.Empty:
-                    break
-                if out is None:  # stop sentinel
-                    client.loop_stop()
-                    try:
-                        client.disconnect()
-                    except Exception:
-                        _LOGGER.debug(
-                            "swallowed exception in %s", "_mqtt_session_sync", exc_info=True
-                        )
-                    return collected, status
-                pub_topic, pub_payload = out
-                client.publish(pub_topic, pub_payload)
-                _LOGGER.debug("_mqtt_session: published %s", pub_topic)
-        try:
-            item = msg_q.get(timeout=min(remaining, 0.1))
-        except _queue.Empty:
-            continue
-        if item is None:  # disconnect sentinel
-            break
-        # A caller with an on_message handler gets each message there; keeping
-        # every one for an hour-long stream session as well was unbounded
-        # growth for a result nobody read.
-        if not on_message:
-            collected.append(item)
-        if on_message:
-            try:
-                on_message(*item)
-            except Exception:
-                _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
-
-    client.loop_stop()
-    try:
-        client.disconnect()
-    except Exception:
-        _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
-    return collected, status
-
-
 class _PersistentMqtt:
     """One long-lived paho MQTT connection reused across many publish/collect
     round-trips - matching the official app's single persistent connection
@@ -2614,7 +2337,7 @@ class _PersistentMqtt:
         # A retired instance must never rebuild: retire() nulls _client, which on
         # its own would look exactly like "not started yet" and reconnect with the
         # credential the broker just refused.  Callers still holding a retired
-        # client get a clean False and fall back to a per-op session.
+        # client get a clean False, reported to their caller as an error.
         if self._retired:
             return False
         with self._lock:
@@ -2794,133 +2517,6 @@ class _PersistentMqtt:
                 c.disconnect()
             except Exception:
                 pass
-
-
-async def _mqtt_session(
-    mqtt_url: str,
-    mqtt_user: str,
-    mqtt_pwd: str,
-    client_id: str,
-    subscribe_topics: list,
-    publish_items: list,
-    duration: float,
-    on_message=None,
-    ws_path: str = "/mqtt",
-    on_ready=None,
-) -> list:
-    """Async wrapper: runs _mqtt_session_sync in a thread executor.
-
-    Returns list of (topic, payload_str) tuples.
-    """
-    messages, status = await _mqtt_session_with_status(
-        mqtt_url,
-        mqtt_user,
-        mqtt_pwd,
-        client_id,
-        subscribe_topics,
-        publish_items,
-        duration,
-        on_message,
-        ws_path,
-        on_ready,
-    )
-    if status.get("error"):
-        _LOGGER.warning("_mqtt_session failed: %s", status["error"])
-    return messages
-
-
-async def _mqtt_session_with_status(
-    mqtt_url: str,
-    mqtt_user: str,
-    mqtt_pwd: str,
-    client_id: str,
-    subscribe_topics: list,
-    publish_items: list,
-    duration: float,
-    on_message=None,
-    ws_path: str = "/mqtt",
-    on_ready=None,
-) -> tuple:
-    """Like _mqtt_session but also returns the status dict for diagnostics."""
-    import functools
-
-    loop = asyncio.get_running_loop()
-    fn = functools.partial(
-        _mqtt_session_sync,
-        mqtt_url,
-        mqtt_user,
-        mqtt_pwd,
-        client_id,
-        subscribe_topics,
-        publish_items,
-        duration,
-        on_message,
-        ws_path,
-        on_ready,
-    )
-    return await loop.run_in_executor(None, fn)
-
-
-async def _mqtt_get_playback_server_info(
-    mqtt_url: str,
-    mqtt_user: str,
-    mqtt_pwd: str,
-    device_id: str,
-    client_id: str,
-    timeout: float = 15.0,
-) -> Optional[dict]:
-    """Publish getPlaybackServerInfoReq and return the payload dict, or None.
-
-    MQTT topics from IConstants.java / MqttManage.java:
-      publish : iot/v1/s/{userId}/{service}/{method}
-      subscribe: iot/v1/cb/{deviceId}/#
-    Response arrives on iot/v1/c/{userId}/PlayBack/getPlaybackServerInfoResp
-    (or on the device callback topic).
-    """
-    user_id = mqtt_user or "0"
-    seq = str(random.randint(100000, 999999))
-    pub_topic = f"iot/v1/s/{user_id}/PlayBack/getPlaybackServerInfoReq"
-    payload = json.dumps(
-        {
-            "method": "getPlaybackServerInfoReq",
-            "service": "PlayBack",
-            "devId": device_id,
-            "srcAddr": f"0.{user_id}",
-            "seq": seq,
-            "tst": int(time.time() * 1000),
-            "payload": {},
-        }
-    )
-
-    result_holder: list = []
-
-    def _check(topic, raw):
-        try:
-            body = json.loads(raw)
-            method = body.get("method", "")
-            if "PlaybackServerInfo" not in method and "getPlaybackServer" not in method:
-                return
-            pl = body.get("payload") or body.get("data") or {}
-            if pl.get("serverIP") or pl.get("serverIp"):
-                pl["serverIP"] = pl.get("serverIP") or pl.get("serverIp")
-                result_holder.append(pl)
-        except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_check", exc_info=True)
-
-    await _mqtt_session(
-        mqtt_url,
-        mqtt_user,
-        mqtt_pwd,
-        client_id,
-        subscribe_topics=[
-            f"iot/v1/cb/{device_id}/#",
-            f"iot/v1/c/{user_id}/#",
-        ],
-        publish_items=[(pub_topic, payload)],
-        duration=timeout,
-        on_message=_check,
-    )
-    return result_holder[0] if result_holder else None
 
 
 def _ip_looks_ascii_garbled(ip_str) -> bool:
@@ -3162,6 +2758,16 @@ def avio_header(
     return _AVIO_RESP_HDR.pack(seq, command, ts_ms, length, reserved)
 
 
+def avio_frame(seq: int, command: int, payload: bytes = b"") -> bytes:
+    """One whole AVIO control frame stamped now: the header, then ``payload``.
+
+    What each transport's single sender puts on the wire. ``seq`` is the
+    caller's: the client's dSeq counter for a control command, a random one
+    for the heartbeat, as the app does.
+    """
+    return avio_header(seq, command, int(time.time() * 1000), len(payload), 0) + payload
+
+
 def ipc_envelope(
     method: str, device_id: str, user_id, numeric_uid_raw, *, seq: str, payload
 ) -> str:
@@ -3231,6 +2837,9 @@ class _AvioWaiter:
         self._match = match
         self._future = _cfutures.Future()
 
+    #: A single question leaves the router once it is answered.
+    _keeps_listening = False
+
     def _accepts(self, resp) -> bool:
         if self._match is None:
             return True
@@ -3238,6 +2847,12 @@ class _AvioWaiter:
             return bool(self._match(resp))
         except Exception:
             return False
+
+    def _finished(self) -> bool:
+        return self._future.done()
+
+    def _deliver(self, resp) -> None:
+        self._future.set_result(resp)
 
     def cancel(self) -> None:
         """Withdraw the question - used when the command could not be sent."""
@@ -3299,6 +2914,49 @@ class _AvioWaiter:
             raise
 
 
+class _AvioCollector:
+    """Every reply to one command, in arrival order, until withdrawn.
+
+    For a command answered in several pages with no further request (the SD
+    listing). One registration stands in for one waiter per page: it stays in
+    the router, takes each reply in turn, and the caller reads them off with
+    ``next()`` until the listing says it has ended - the app collects
+    LISTEVENT pages the same way, until listEventEndFlag. Replies are handed
+    over through the event loop, so it is safe to feed from the SDES bridge
+    thread. Create it on the loop that will read it.
+    """
+
+    _keeps_listening = True
+
+    def __init__(self, router: "AvioResponseRouter", command: int) -> None:
+        self._router = router
+        self._command = command
+        self._loop = asyncio.get_running_loop()
+        self._replies: "asyncio.Queue[AvioResponse]" = asyncio.Queue()
+        self._closed = False
+
+    def _accepts(self, resp) -> bool:
+        return True
+
+    def _finished(self) -> bool:
+        return self._closed
+
+    def _deliver(self, resp) -> None:
+        self._loop.call_soon_threadsafe(self._replies.put_nowait, resp)
+
+    async def next(self, timeout: float) -> "Optional[AvioResponse]":
+        """The next reply, or None if none arrives within ``timeout``."""
+        try:
+            return await asyncio.wait_for(self._replies.get(), timeout)
+        except TimeoutError:
+            return None
+
+    def cancel(self) -> None:
+        """Stop collecting; a later reply goes to nobody."""
+        self._closed = True
+        self._router._forget(self)
+
+
 class AvioResponseRouter:
     """Match inbound AVIO responses to the commands that asked for them.
 
@@ -3327,6 +2985,17 @@ class AvioResponseRouter:
             self._waiting.setdefault(command, []).append(waiter)
         return waiter
 
+    def collect(self, command: int) -> _AvioCollector:
+        """Register for every response carrying ``command`` until cancelled.
+
+        Same rule as ``expect``: register before sending. Takes its turn with
+        the single questions for that command in registration order.
+        """
+        collector = _AvioCollector(self, command)
+        with self._lock:
+            self._waiting.setdefault(command, []).append(collector)
+        return collector
+
     def dispatch(self, frame: bytes) -> bool:
         """Hand ``frame`` to whoever is waiting for it.
 
@@ -3344,24 +3013,25 @@ class AvioResponseRouter:
                 if queue:
                     # Oldest first, skipping questions already settled and
                     # any whose match turns this reply down.
-                    queue[:] = [w for w in queue if not w._future.done()]
+                    queue[:] = [w for w in queue if not w._finished()]
                     for candidate in queue:
                         if candidate._accepts(resp):
                             waiter = candidate
-                            queue.remove(candidate)
+                            if not candidate._keeps_listening:
+                                queue.remove(candidate)
                             break
                 if queue is not None and not queue:
                     self._waiting.pop(resp.command, None)
             if waiter is None:
                 return False
-            waiter._future.set_result(resp)
+            waiter._deliver(resp)
             return True
         except Exception:
             # Runs inline on the bridge's receive path; a bad frame must never
             # take the media loop down with it.
             return False
 
-    def _forget(self, waiter: "_AvioWaiter") -> None:
+    def _forget(self, waiter: "_AvioWaiter | _AvioCollector") -> None:
         with self._lock:
             queue = self._waiting.get(waiter._command)
             if not queue:
@@ -3451,20 +3121,9 @@ def build_remb(sender_ssrc: int, media_ssrcs: "list", bitrate_bps: int) -> bytes
     return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
 
 
-def decode_remb_bitrate(pkt: bytes) -> int:
-    """The bitrate a REMB packet asks for. For tests and diagnostics."""
-    # Layout: 0-3 header, 4-7 sender SSRC, 8-11 media SSRC, 12-15 "REMB",
-    # 16 num-SSRC, 17-19 exponent+mantissa, 20+ the SSRCs.
-    b = pkt[17]
-    exp = b >> 2
-    mantissa = ((b & 0x03) << 16) | (pkt[18] << 8) | pkt[19]
-    return mantissa << exp
-
-
-#: RTPFB feedback message types (RFC 4585 s6.1, RFC 5104 s4.2).
+#: RTPFB feedback message types (RFC 4585 s6.1).
 _RTPFB_PT = 205
 _FMT_NACK = 1
-_FMT_TMMBR = 3
 
 
 def build_nack(sender_ssrc: int, media_ssrc: int, lost_seqs: "list") -> bytes:
@@ -3511,67 +3170,6 @@ def build_nack(sender_ssrc: int, media_ssrc: int, lost_seqs: "list") -> bytes:
     )
     # RTCP length is in 32-bit words, minus one.
     return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
-
-
-def build_tmmbr(
-    sender_ssrc: int, media_ssrc: int, bitrate_bps: int, overhead: int = 60
-) -> bytes:
-    """A TMMBR (RFC 5104 s4.2.1) telling ``media_ssrc`` not to exceed a rate.
-
-    Distinct from REMB, which this camera was measured to ignore: REMB reports
-    an *estimate* of what the path will bear, TMMBR states a *bound* the sender
-    must respect. They are different messages and a firmware can honour one
-    without the other.
-
-    The bound is encoded as a 17-bit mantissa scaled by a 6-bit exponent, so
-    not every rate is representable. We round the mantissa DOWN, never up: a
-    TMMBR that permits more than the caller asked for is worse than sending
-    none at all on a link that is already saturating.
-
-    ``overhead`` is Measured Overhead, per-packet transport overhead in bytes
-    (9 bits). 60 is the usual IP+UDP+RTP+SRTP figure and is what browsers send.
-    """
-    if bitrate_bps <= 0:
-        raise ValueError(
-            f"a TMMBR must name a positive bitrate, got {bitrate_bps}; a bound "
-            f"of zero asks the camera to stop sending"
-        )
-    exp = 0
-    mantissa = int(bitrate_bps)
-    while mantissa >= (1 << 17):
-        mantissa >>= 1
-        exp += 1
-    fci = struct.pack(
-        "!II",
-        media_ssrc & 0xFFFFFFFF,
-        (exp << 26) | (mantissa << 9) | (max(0, overhead) & 0x1FF),
-    )
-    # The header's media-source field is unused for TMMBR and SHALL be zero
-    # (RFC 5104 s4.2.1.2); the limited SSRC travels in the FCI above.
-    pkt = (
-        struct.pack("!BBH", 0x80 | _FMT_TMMBR, _RTPFB_PT, 0)
-        + struct.pack("!II", sender_ssrc & 0xFFFFFFFF, 0)
-        + fci
-    )
-    return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
-
-
-def decode_tmmbr_bitrate(pkt: bytes) -> int:
-    """The bound carried by a TMMBR built above, in bits per second."""
-    word = struct.unpack("!I", pkt[16:20])[0]
-    return ((word >> 9) & 0x1FFFF) << (word >> 26)
-
-
-def decode_nack_seqs(pkt: bytes) -> "list":
-    """The sequence numbers a Generic NACK asks for. For tests and diagnostics."""
-    out = []
-    for off in range(12, len(pkt), 4):
-        pid, blp = struct.unpack_from("!HH", pkt, off)
-        out.append(pid)
-        for bit in range(16):
-            if blp & (1 << bit):
-                out.append((pid + bit + 1) & 0xFFFF)
-    return out
 
 
 class NackTracker:
@@ -3902,19 +3500,19 @@ class AvioRequestMixin:
         and the rest arrive with nobody waiting, so a caller saw the oldest
         255 recordings and never today's.
 
-        Every waiter is registered before the send, for the same reason as the
-        single request: the pages follow each other faster than a waiter
-        registered after the first reply could catch the second. Collection
-        stops at the first wait that times out (``timeout`` for the first
-        reply, ``more_timeout`` after it), at ``max_replies``, once ``budget``
-        seconds have passed since the send, or as soon as ``done(replies)`` is
-        true. An empty list means nothing came back.
+        One collector is registered before the send, for the same reason as
+        the single request: the pages follow each other faster than a
+        registration made after the first reply could catch the second.
+        Collection stops at the first wait that times out (``timeout`` for the
+        first reply, ``more_timeout`` after it), at ``max_replies``, once
+        ``budget`` seconds have passed since the send, or as soon as
+        ``done(replies)`` is true - for the listing, its end flag. An empty
+        list means nothing came back.
 
         Replies are matched on ``response_cmd`` alone, so two of these for the
         same command at once on one session can take each other's replies.
         """
-        router = self._avio_responses
-        waiters = [router.expect(response_cmd) for _ in range(max(1, max_replies))]
+        pages = self._avio_responses.collect(response_cmd)
         replies: "list[AvioResponse]" = []
         try:
             try:
@@ -3925,23 +3523,22 @@ class AvioRequestMixin:
                 return replies
             loop = asyncio.get_running_loop()
             give_up = None if budget is None else loop.time() + budget
-            for waiter in waiters:
+            while len(replies) < max(1, max_replies):
                 wait = more_timeout if replies else timeout
                 if give_up is not None:
                     wait = min(wait, give_up - loop.time())
                     if wait <= 0:
                         break
-                resp = await waiter.result(wait)
+                resp = await pages.next(wait)
                 if resp is None:
                     break
                 replies.append(resp)
                 if done is not None and done(replies):
                     break
         finally:
-            # The ones never reached are still registered; a stray later reply
-            # must go to nobody rather than to a question long since answered.
-            for waiter in waiters:
-                waiter.cancel()
+            # A stray later reply must go to nobody rather than to a question
+            # long since answered.
+            pages.cancel()
         return replies
 
 

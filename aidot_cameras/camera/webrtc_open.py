@@ -32,12 +32,20 @@ from ..exceptions import (
     AidotPlaintextMqttRefused,
     AidotSdPlaybackUnavailable,
 )
-from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uris
+from .constants import (
+    _LIVE_PLAY_NOT_READY,
+    CMD_AVIO_CTRL_HEARTHEAT_REQ,
+    E_CMD_AVIO_CTRL_SESSION_MODE_RESP,
+    IOTYPE_USER_IPCAM_AUDIOSTART,
+    IOTYPE_USER_IPCAM_SPEAKERSTART,
+    IOTYPE_USER_IPCAM_SPEAKERSTOP,
+    fallback_turn_uris,
+    stun_server_uris,
+)
 from .sdes_open import _answer_sdp_can_nominate
-from .webrtc import WebRTCSession
+from .webrtc import WebRTCSession, dtls_send_avio
 from .protocol import (
     ipc_envelope,
-    avio_header,
     mask_sdp_secrets,
     AvioResponseRouter,
     _avio_cmd_id,
@@ -49,7 +57,6 @@ from .protocol import (
     _make_status_pair,
     _make_talk_audio_track,
     _report_failed_transports,
-    _mqtt_session_sync,
     _mqtt_timestamp,
     _normalize_bundle_ice_credentials,
     _reorder_m_section_ice_attrs,
@@ -1352,8 +1359,6 @@ class _DtlsOpenState:
     RTCPeerConnection: "Any" = dataclasses.field(init=False)  # head
     RTCSessionDescription: "Any" = dataclasses.field(init=False)  # head
     candidate_from_sdp: "Any" = dataclasses.field(init=False)  # head
-    mqtt_user: "Any" = dataclasses.field(init=False)  # credentials_and_mqtt_setup
-    mqtt_pwd: "Any" = dataclasses.field(init=False)  # credentials_and_mqtt_setup
     user_id: "Any" = dataclasses.field(init=False)  # credentials_and_mqtt_setup
     mqtt_cid: "Any" = dataclasses.field(init=False)  # credentials_and_mqtt_setup
     mqtt_url: "Any" = dataclasses.field(init=False)  # credentials_and_mqtt_setup
@@ -1707,7 +1712,7 @@ async def _dtls_open_credentials_and_mqtt_setup(self, ps: _DtlsOpenState) -> Non
     Split out of ``_async_open_webrtc_stream_impl``; reads and writes the open's
     state through ``ps`` (a ``_DtlsOpenState``).
     """
-    ps.mqtt_user, ps.mqtt_pwd, _base_cid = await self._mqtt_credentials()
+    _user, _pwd, _base_cid = await self._mqtt_credentials()
     ps.user_id = str(self.user_id)
     # This path alone also honours the raw user config's client id, ahead
     # of the ``app-<user>`` fallback the shared helper already applied.
@@ -2010,67 +2015,40 @@ async def _dtls_open_ice_config_and_user_info(self, ps: _DtlsOpenState) -> None:
         webrtc_req_echo_fut=ps.webrtc_req_echo_fut,
     )
 
-    # MQTT transport for the stream signaling.  Default (AIDOT_PERSISTENT_MQTT
-    # on): ride the SAME account-level persistent connection commands/attrs use
-    # (the stream's mqtt_cid IS the authorized mqttClientId, so it's the same
-    # connection) - subscribe + register a handler + drain outgoing_q through
-    # it, and DON'T tear the connection down on stop (matching the app).  With
-    # it off: a dedicated connect-per-stream session in an executor (stopped
-    # via outgoing_q sentinel on WebRTCSession.stop()).
+    # MQTT transport for the stream signaling: the SAME account-level
+    # persistent connection commands and attribute reads use (the stream's
+    # mqtt_cid IS the authorized mqttClientId, so there is only the one).
+    # Subscribe, register a handler and drain outgoing_q through it, and do
+    # NOT tear the connection down on stop - the app keeps its one connection
+    # for the login session too.  There is no per-stream fallback: a second
+    # connect with the same clientId would evict this one.
     # A prior open may have left a drain running (e.g. a reopen with no
     # async_stop_streaming between them); reap it before starting a new one
-    # so we don't orphan its executor thread + handler on the shared conn.
+    # so we don't orphan its task + handler on the shared conn.
     await self._reap_stream_drain()
-    _pm_stream = (
-        await self._get_persistent_mqtt() if self._resolve_persistent_mqtt() else None
-    )
-    if _pm_stream is not None:
-        await _pm_stream.subscribe(ps.sub_topics)
-        _pm_stream.add_handler(_on_mqtt_message)
-
-        async def _pm_stream_drain():
-            try:
-                await _drain_outgoing_queue(ps.loop, ps.outgoing_q, _pm_stream.publish)
-            finally:
-                _pm_stream.remove_handler(_on_mqtt_message)
-
-        ps.mqtt_fut = asyncio.ensure_future(_pm_stream_drain())
-        # Track the drain AND its queue so teardown (or a replacing open) can
-        # reap it even if this open is cancelled before a WebRTCSession takes
-        # ownership.  _reap_stream_drain pushes the outgoing_q sentinel to
-        # release the thread blocked on outgoing_q.get and removes the handler
-        # from the shared persistent connection.
-        self._stream_mqtt_drain = ps.mqtt_fut
-        self._stream_mqtt_outq = ps.outgoing_q
-        _on_mqtt_ready({"connected": True, "rc": 0, "rc_str": "persistent"})
-    else:
-        ps.mqtt_fut = ps.loop.run_in_executor(
-            None,
-            lambda: _mqtt_session_sync(
-                ps.mqtt_url,
-                ps.mqtt_user,
-                ps.mqtt_pwd,
-                ps.mqtt_cid,
-                ps.sub_topics,
-                [],
-                3600.0,
-                _on_mqtt_message,
-                "/mqtt",
-                _on_mqtt_ready,
-                ps.outgoing_q,
-            ),
+    _pm_stream = await self._get_persistent_mqtt()
+    if _pm_stream is None:
+        raise AidotMqttUnavailable(
+            "async_open_webrtc_stream: no MQTT connection for the stream signaling"
         )
-        # Register with the same backstop the persistent branch uses.  This
-        # session runs for 3600 s and is stopped ONLY by the outgoing_q
-        # sentinel; nothing pushes that sentinel when an open is cancelled,
-        # and until now nothing held a reference either - so a cancelled
-        # open orphaned an executor thread, and its MQTT connection, for a
-        # full hour.  Executor workers are finite: enough orphans and every
-        # run_in_executor in the process blocks, which presents to a caller
-        # as an open that simply never returns.  _release_stream_drain_to_session
-        # clears this on success, so a live session is never reaped.
-        self._stream_mqtt_drain = ps.mqtt_fut
-        self._stream_mqtt_outq = ps.outgoing_q
+    await _pm_stream.subscribe(ps.sub_topics)
+    _pm_stream.add_handler(_on_mqtt_message)
+
+    async def _pm_stream_drain():
+        try:
+            await _drain_outgoing_queue(ps.loop, ps.outgoing_q, _pm_stream.publish)
+        finally:
+            _pm_stream.remove_handler(_on_mqtt_message)
+
+    ps.mqtt_fut = asyncio.ensure_future(_pm_stream_drain())
+    # Track the drain AND its queue so teardown (or a replacing open) can
+    # reap it even if this open is cancelled before a WebRTCSession takes
+    # ownership.  _reap_stream_drain pushes the outgoing_q sentinel to
+    # release the drain blocked on outgoing_q.get and removes the handler
+    # from the shared persistent connection.
+    self._stream_mqtt_drain = ps.mqtt_fut
+    self._stream_mqtt_outq = ps.outgoing_q
+    _on_mqtt_ready({"connected": True, "rc": 0, "rc_str": "persistent"})
 
     # Wait for MQTT to be connected and subscribed before proceeding.
     # threading.Event.wait(timeout) returns True if set, False on timeout.
@@ -2903,7 +2881,9 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
             # as the SDES open does - a play that overtakes the switch plays
             # nothing. Registered before the send; the echo can beat it back.
             _echo = (
-                ps._avio_responses.expect(5377, session_mode_is(_mode))
+                ps._avio_responses.expect(
+                    E_CMD_AVIO_CTRL_SESSION_MODE_RESP, session_mode_is(_mode)
+                )
                 if ps._sd_playback is not None
                 else None
             )
@@ -2940,7 +2920,9 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
                 return
             # Asked again with a fresh seq: the firmware ignores a mode
             # request whose seq is not above the last it accepted.
-            _echo = ps._avio_responses.expect(5377, session_mode_is(_mode))
+            _echo = ps._avio_responses.expect(
+                E_CMD_AVIO_CTRL_SESSION_MODE_RESP, session_mode_is(_mode)
+            )
             _seq = self._next_dseq()
             try:
                 _dc_ref.send(
@@ -2954,15 +2936,8 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
         _req = ps._sd_playback.request
         for _try in range(3):
             try:
-                _dc_ref.send(
-                    avio_header(
-                        self._next_dseq(),
-                        RECORD_PLAYCONTROL_REQ_CMD,
-                        int(time.time() * 1000),
-                        len(_req),
-                        0,
-                    )
-                    + _req
+                dtls_send_avio(
+                    _dc_ref, self._next_dseq(), RECORD_PLAYCONTROL_REQ_CMD, _req
                 )
                 ps._status("SD playback: PLAY_START sent")
                 return
@@ -2971,16 +2946,17 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
                 await asyncio.sleep(0.5)
 
     def _send_avio_heartbeat(_dc_ref) -> None:
-        # CMD_AVIO_CTRL_HEARTHEAT_REQ = 5156 (AVIOCTRLDEFs.java:119).
+        # CMD_AVIO_CTRL_HEARTHEAT_REQ (5156).
         # Official app sends this every 10 s (KVSWebRTCChannel$9.smali:456-459,
         # Timer period 10000 ms -> sendHeartbeat, KVSWebRTCChannel.smali:14988)
         # to prevent the camera's 22-second watchdog from
-        # tearing down the DTLS session.  Empty payload, header only.
+        # tearing down the DTLS session.  Empty payload, header only.  A
+        # random seq, not the dSeq counter: the app's sendHeartbeat is the one
+        # control send that does not number itself.
         try:
-            _seq = random.randint(0, 0x7FFFFFFF)
-            _ts_ms = int(time.time() * 1000)
-            _hdr = avio_header(_seq, 5156, _ts_ms, 0, 0)
-            _dc_ref.send(_hdr)
+            dtls_send_avio(
+                _dc_ref, random.randint(0, 0x7FFFFFFF), CMD_AVIO_CTRL_HEARTHEAT_REQ
+            )
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
@@ -2990,7 +2966,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
             )
 
     def _send_avio_audiostart(_dc_ref) -> None:
-        # IOTYPE_USER_IPCAM_AUDIOSTART = 768 (AVIOCTRLDEFs.java:154).
+        # IOTYPE_USER_IPCAM_AUDIOSTART (768).
         # The camera negotiates audio as sendrecv.  aiortc's RTCRtpSender
         # sends RTCP SR with packet_count=0 (no track), which tells the
         # camera we said sendrecv but are sending nothing.  After ~25 s
@@ -3000,11 +2976,10 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
         # streaming regardless of our send state.  8-byte payload of zeros
         # matches the TUTK IOTC path usage in a.java:1126.
         try:
-            _seq = self._next_dseq()  # the app numbers control commands
-            _ts_ms = int(time.time() * 1000)
-            _payload = b"\x00" * 8
-            _hdr = avio_header(_seq, 768, _ts_ms, len(_payload), 0)
-            _dc_ref.send(_hdr + _payload)
+            # The app numbers control commands from the dSeq counter.
+            dtls_send_avio(
+                _dc_ref, self._next_dseq(), IOTYPE_USER_IPCAM_AUDIOSTART, b"\x00" * 8
+            )
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
@@ -3014,19 +2989,20 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
             )
 
     def _send_avio_speaker(_dc_ref, start: bool) -> None:
-        # IOTYPE_USER_IPCAM_SPEAKERSTART = 848 / SPEAKERSTOP = 849
-        # (AVIOCTRLDEFs.java:268-271).  The official app sends SPEAKERSTART
+        # IOTYPE_USER_IPCAM_SPEAKERSTART (848) / SPEAKERSTOP (849).  The
+        # official app sends SPEAKERSTART
         # when talk begins (KVSWebRTCChannel.smali:9684, in startTalk) to
         # open the camera's speaker, and SPEAKERSTOP (:11939, stopTalk) to
         # close it.  Payload is
         # SMsgAVIoctrlAVStream.parseContent(0) = 8 bytes, channel=0 LE.
         try:
-            _cmd = 848 if start else 849
-            _seq = self._next_dseq()  # the app numbers control commands
-            _ts_ms = int(time.time() * 1000)
-            _payload = b"\x00" * 8  # channel=0
-            _hdr = avio_header(_seq, _cmd, _ts_ms, len(_payload), 0)
-            _dc_ref.send(_hdr + _payload)
+            _cmd = (
+                IOTYPE_USER_IPCAM_SPEAKERSTART
+                if start
+                else IOTYPE_USER_IPCAM_SPEAKERSTOP
+            )
+            # The app numbers control commands; payload is channel=0.
+            dtls_send_avio(_dc_ref, self._next_dseq(), _cmd, b"\x00" * 8)
             ps._status(
                 f"talk: sent AVIO SPEAKER{'START' if start else 'STOP'} ({_cmd})"
             )

@@ -40,7 +40,6 @@ from aidot.discover import BroadcastProtocol as _UpstreamBroadcastProtocol
 from aidot.discover import Discover as _UpstreamDiscover
 from aidot.models.discover_model import DiscoverRequest, DiscoverResponse
 
-from ._upstream import broadcast_protocol_args
 from .const import CONF_ID, CONF_IPADDRESS
 from .crypto import aes_decrypt, aes_encrypt
 from .exceptions import AidotOSError
@@ -143,11 +142,10 @@ class InterfaceBroadcastProtocol(_UpstreamBroadcastProtocol):
         user_id: str,
         broadcast_addr: str = "255.255.255.255",
     ) -> None:
-        # Upstream has changed this signature before (`(callback)` on
-        # 0.3.54-0.3.55), so the positional args come from _upstream rather
-        # than being hardcoded.  `self.user_id` is set unconditionally
-        # afterwards because our overrides read it.
-        super().__init__(*broadcast_protocol_args(callback, user_id))
+        # `(callback, user_id)` on every supported upstream release
+        # (tests/test_upstream_compat.py pins it).  `self.user_id` is set
+        # unconditionally afterwards because our overrides read it.
+        super().__init__(callback, user_id)
         self.user_id = user_id
         self._broadcast_addr = broadcast_addr
 

@@ -136,8 +136,7 @@ class _Pm:
 
 
 def _querying_camera(monkeypatch, make_camera_device_client, replies):
-    """A real client whose query rides a fake persistent connection; a fresh
-    MQTT session would fail the test."""
+    """A real client whose query rides a fake persistent connection."""
     from aidot_cameras.camera import client as client_mod
 
     cam = make_camera_device_client("A001064")
@@ -152,14 +151,12 @@ def _querying_camera(monkeypatch, make_camera_device_client, replies):
     async def _get_pm():
         return pm
 
-    async def _fresh_session(*a, **k):
-        raise AssertionError("opened a second session on the account's client id")
-
     cam._mqtt_credentials = _creds
     cam._async_get_mqtt_url = _url
-    cam._resolve_persistent_mqtt = lambda: True
     cam._get_persistent_mqtt = _get_pm
-    monkeypatch.setattr(client_mod, "_mqtt_session_with_status", _fresh_session)
+    # The per-operation session that would have opened a second connection
+    # on the account's client id is gone; nothing else may connect.
+    assert not hasattr(client_mod, "_mqtt_session_with_status")
     return cam, pm
 
 

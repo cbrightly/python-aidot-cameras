@@ -43,6 +43,13 @@ import struct
 import time
 from typing import List, NamedTuple, Optional
 
+from .constants import (
+    IOTYPE_USER_IPCAM_HASLISTEVENT_REQ,
+    IOTYPE_USER_IPCAM_HASLISTEVENT_RESP,
+    IOTYPE_USER_IPCAM_LISTEVENT_REQ,
+    IOTYPE_USER_IPCAM_LISTEVENT_RESP,
+)
+
 #: One record. The size is confirmed from the vendor's own arraycopy.
 EVENT_RECORD_LEN = 12
 
@@ -134,12 +141,12 @@ class SdRecordingList(NamedTuple):
 
 
 #: Reply command ids, so a caller that knows which question it asked can say so.
-LISTEVENT_RESP_CMD = 0x319
-HASLISTEVENT_RESP_CMD = 0x4B6
+LISTEVENT_RESP_CMD = IOTYPE_USER_IPCAM_LISTEVENT_RESP
+HASLISTEVENT_RESP_CMD = IOTYPE_USER_IPCAM_HASLISTEVENT_RESP
 
-#: Request command ids, from AVIOCTRLDEFs in the vendor's own client.
-HASLISTEVENT_REQ_CMD = 0x4B5
-LISTEVENT_REQ_CMD = 0x318
+#: Request command ids (the table in constants.py).
+HASLISTEVENT_REQ_CMD = IOTYPE_USER_IPCAM_HASLISTEVENT_REQ
+LISTEVENT_REQ_CMD = IOTYPE_USER_IPCAM_LISTEVENT_REQ
 
 #: The event selector the vendor's app sends in its event mode. Its
 #: KVSWebRTCChannel.getSDRecordList2 (KVSWebRTCChannel.smali:13184) puts

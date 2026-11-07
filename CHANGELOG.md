@@ -6,6 +6,54 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+Soak: resets the clock. Every MQTT operation now rides the one persistent
+connection with no per-operation fallback, the SD listing collects its pages
+through one registration, and both transports send AVIO commands through one
+function each, all on default paths.
+
+### Changed
+- **One MQTT connection, and no fallback that evicts it.** Commands, attribute
+  reads, device-action queries and stream-open signaling use only the
+  account's persistent connection. The per-operation session they fell back to
+  when it failed (and that `AIDOT_PERSISTENT_MQTT=0` made the default)
+  connected with the same `mqttClientId`, and the broker allows one session
+  per id, so every fallback evicted the persistent connection it was standing
+  in for. Now an operation that finds no connection reports failure: a command
+  returns False, an attribute read logs the transport failure and returns the
+  device list's properties, a stream open raises `AidotMqttUnavailable`.
+- **One named table of AVIO command ids** in `camera/constants.py`, named after
+  the app's `AVIOCTRLDEFs` (`IOTYPE_USER_IPCAM_SPEAKERSTART`,
+  `E_CMD_AVIO_CTRL_SESSION_MODE_REQ`, `CMD_AVIO_CTRL_HEARTHEAT_REQ`, ...), in
+  place of the numbers spread across eight modules. The existing names
+  (`SETSTREAMCTRL_CMD`, `LISTEVENT_REQ_CMD`, `RECORD_PLAYCONTROL_REQ_CMD`, ...)
+  stay as aliases. No value changes.
+- **One AVIO send per transport.** On DTLS every control frame (session
+  commands, LIVING's PLAY_START, AUDIOSTART, the speaker, the heartbeat) goes
+  through `webrtc.dtls_send_avio`; on SDES the heartbeat, the speaker and the
+  session commands go through the bridge's one encrypted-SCTP sender. The
+  heartbeat keeps its random seq, as the app's does; everything else keeps the
+  dSeq counter. Same bytes on the wire.
+- **The SD listing collects its pages with one registration** instead of 64
+  waiters registered up front, until the listing reports its end, as the app
+  reads `listEventEndFlag`. Same pages, same limits.
+
+### Deprecated
+- **`AIDOT_PERSISTENT_MQTT`** is accepted and ignored; set to
+  `0`/`false`/`no`/`off` it logs one warning. See above.
+
+### Removed
+- Code nothing called: `protocol._mqtt_session`,
+  `_mqtt_session_with_status`, `_mqtt_session_sync` (the per-operation
+  session) and `_mqtt_get_playback_server_info`; `build_tmmbr` and
+  `decode_tmmbr_bitrate`, whose knob was already gone, with their tests;
+  `decode_remb_bitrate` and `decode_nack_seqs`, which only tests used and which
+  now live in `tests/rtcp_decode.py`.
+- The `_upstream` names left over from upstream 0.3.54-0.3.55
+  (`HAS_TYPED_ACCOUNT`, `UserInformation`, `DEVICE_STATE_IS_UPSTREAMS`,
+  `HAS_READ_DATA_SEAM`, `HAS_SHARED_DISCOVERY_MAP`,
+  `broadcast_protocol_args`). `UPSTREAM_SHAPE` stays, because the integration's
+  diagnostics report it.
+
 ## [1.0.0rc71]
 
 Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing on

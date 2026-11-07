@@ -8,11 +8,15 @@ preserving; re-exported from client.py.
 import asyncio
 import logging
 import random
-import time
 from typing import Any, Callable, Optional
 
+from .constants import (
+    IOTYPE_USER_IPCAM_SPEAKERSTART,
+    IOTYPE_USER_IPCAM_SPEAKERSTART_WEB_RTC_RESP,
+    IOTYPE_USER_IPCAM_SPEAKERSTOP,
+)
 from .protocol import (
-    avio_header,
+    avio_frame,
     SPEAKER_ACK_TIMEOUT_S,
     AvioRequestMixin,
     AvioResponseRouter,
@@ -24,6 +28,17 @@ _LOGGER = logging.getLogger(__name__)
 
 #: How long stop() waits for the MQTT signaling session to finish.
 _STOP_MQTT_WAIT_S = 5.0
+
+
+def dtls_send_avio(dc: Any, seq: int, cmd: int, payload: bytes = b"") -> None:
+    """The one AVIO sender on DTLS: frame ``cmd`` and send it on the data channel.
+
+    Every control command on this transport goes out here - the session's
+    commands, and the open's LIVING follow-ups, AUDIOSTART, speaker and
+    heartbeat - so the framing cannot drift between them. Raises when the send
+    fails; each caller decides what a failure means to it.
+    """
+    dc.send(avio_frame(seq, cmd, payload))
 
 
 class WebRTCSession(_PlaybackControls, AvioRequestMixin):
@@ -87,10 +102,7 @@ class WebRTCSession(_PlaybackControls, AvioRequestMixin):
         if self._dc is None:
             return False
         try:
-            _seq = self._next_seq()
-            _ts_ms = int(time.time() * 1000)
-            _hdr = avio_header(_seq, cmd, _ts_ms, len(payload), 0)
-            self._dc.send(_hdr + payload)
+            dtls_send_avio(self._dc, self._next_seq(), cmd, payload)
             return True
         except Exception:
             return False
@@ -121,10 +133,14 @@ class WebRTCSession(_PlaybackControls, AvioRequestMixin):
         # been sent viewer audio by the time we detached it.  The verdict is
         # cheap here - 0.01-0.38s measured on an A000088.
         #
-        # IOTYPE_USER_IPCAM_SPEAKERSTART = 848 (AVIOCTRLDEFs.java), 8-byte
-        # channel=0 payload; the camera answers 851.
+        # 8-byte channel=0 payload; the camera answers 851.
         self._talk_holder["provider"] = pcm_provider
-        if not await _speaker_opened(self, 848, 851, SPEAKER_ACK_TIMEOUT_S):
+        if not await _speaker_opened(
+            self,
+            IOTYPE_USER_IPCAM_SPEAKERSTART,
+            IOTYPE_USER_IPCAM_SPEAKERSTART_WEB_RTC_RESP,
+            SPEAKER_ACK_TIMEOUT_S,
+        ):
             self._talk_holder["provider"] = None
             return False
         try:
@@ -141,8 +157,7 @@ class WebRTCSession(_PlaybackControls, AvioRequestMixin):
         Sends AVIO SPEAKERSTOP (849) and detaches the talk track (``replaceTrack(None)``
         - the app's ``setEnabled(false)``: present-but-idle, no RTP, no renegotiation).
         """
-        # IOTYPE_USER_IPCAM_SPEAKERSTOP = 849.
-        self._avio_cmd(849, b"\x00" * 8)
+        self._avio_cmd(IOTYPE_USER_IPCAM_SPEAKERSTOP, b"\x00" * 8)
         try:
             if self._audio_sender is not None:
                 self._audio_sender.replaceTrack(None)
@@ -243,7 +258,7 @@ class WebRTCSession(_PlaybackControls, AvioRequestMixin):
         # "mic occupied".  Idempotent (harmless if the speaker was already closed).
         if self.talk_supported and self._talk_holder.get("was_active"):
             try:
-                self._avio_cmd(849, b"\x00" * 8)
+                self._avio_cmd(IOTYPE_USER_IPCAM_SPEAKERSTOP, b"\x00" * 8)
                 if self._audio_sender is not None:
                     self._audio_sender.replaceTrack(None)
                 self._talk_holder["provider"] = None

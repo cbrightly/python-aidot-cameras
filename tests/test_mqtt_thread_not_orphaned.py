@@ -1,15 +1,10 @@
-"""A cancelled open must not orphan its MQTT session thread.
+"""A cancelled open must not orphan its MQTT stream drain.
 
-Both signalling transports park a worker thread that only exits when a `None`
-sentinel reaches `outgoing_q`. `_reap_stream_drain` is the backstop for an open
+The stream signalling parks a drain on `outgoing_q` that only exits when a
+`None` sentinel reaches it. `_reap_stream_drain` is the backstop for an open
 that was cancelled before a session took ownership - but it can only reap what
-it was told about, and the non-persistent branch never registered.
-
-That mattered because the non-persistent session runs for 3600 s. A cancelled
-open orphaned a thread, and its MQTT connection, for a full hour. Executor
-workers are finite; enough orphans and every `run_in_executor` in the process
-blocks - which a caller experiences as an open that never returns, the same
-symptom as the uncancellable drain fixed alongside this.
+it was told about. (The per-open session that once ran beside the persistent
+connection, for 3600 s, never registered; it is gone.)
 """
 
 import asyncio
@@ -19,29 +14,18 @@ import time
 from aidot_cameras.camera.client import CameraMixin
 
 
-def test_both_mqtt_branches_register_with_the_backstop():
-    """Whichever transport runs - the shared persistent connection or a
-    per-open session - its worker and its queue are registered, so a cancelled
-    open can be reaped (the queue is how the reaper pushes the sentinel that
-    actually releases the thread)."""
-    import ast
-
+def test_the_stream_drain_registers_with_the_backstop():
+    """The drain on the shared persistent connection and its queue are
+    registered, so a cancelled open can be reaped (the queue is how the reaper
+    pushes the sentinel that actually releases the drain)."""
     from tests.ast_guards import attr_writes, dtls_open_family, names_in
 
-    forks = [
-        n
-        for fn in dtls_open_family()
-        for n in ast.walk(fn)
-        if isinstance(n, ast.If) and "_pm_stream" in names_in(n.test) and n.orelse
-    ]
-    assert forks, "the MQTT transport fork moved"
-    for fork in forks:
-        for branch in (fork.body, fork.orelse):
-            writes = attr_writes(ast.Module(body=branch, type_ignores=[]), "self")
-            assert {"_stream_mqtt_drain", "_stream_mqtt_outq"} <= writes, (
-                f"line {branch[0].lineno}: an MQTT branch does not register "
-                "its worker and queue with _reap_stream_drain"
-            )
+    phases = [fn for fn in dtls_open_family() if "_pm_stream" in names_in(fn)]
+    assert phases, "the MQTT stream setup moved"
+    for fn in phases:
+        assert {"_stream_mqtt_drain", "_stream_mqtt_outq"} <= attr_writes(fn, "self"), (
+            f"{fn.name}: the stream drain is not registered with _reap_stream_drain"
+        )
 
 
 def test_the_backstop_releases_a_blocked_worker():
@@ -55,8 +39,7 @@ def test_the_backstop_releases_a_blocked_worker():
         loop = asyncio.get_running_loop()
         q = queue.Queue()
         cam = _Cam()
-        # Exactly the shape of the non-persistent branch: a worker parked on a
-        # blocking get that only a sentinel can release.
+        # A worker parked on a blocking get that only a sentinel can release.
         cam._stream_mqtt_drain = loop.run_in_executor(None, lambda: q.get())
         cam._stream_mqtt_outq = q
         t0 = time.monotonic()
