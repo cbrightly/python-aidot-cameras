@@ -78,6 +78,12 @@ LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY = "_persistent_mqtt_lock"
 # start fetches a fresh one - a single extra HTTP call.
 LOGIN_INFO_MQTT_PASSWORD_KEYS = ("mqttPassword", "mqttPwd")
 
+# The broker host /v25/commons/mqttConfig2 named alongside the password it
+# issued (AIDOT_MQTT_CONFIG2 only).  It pairs with that password, so it lives
+# and dies with it: runtime-only, and present only while the password in
+# login_info came from that endpoint.
+LOGIN_INFO_MQTT_CONFIG2_HOST_KEY = "_mqttConfig2Host"
+
 
 def is_camera_model(model_id: "str | None") -> bool:
     """True for an AiDot IPC (camera) model id, e.g. ``LK.IPC.A001513``.
@@ -92,5 +98,6 @@ RUNTIME_ONLY_LOGIN_INFO_KEYS = frozenset(
         LOGIN_INFO_PERSISTENT_MQTT_KEY,
         LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
         *LOGIN_INFO_MQTT_PASSWORD_KEYS,
+        LOGIN_INFO_MQTT_CONFIG2_HOST_KEY,
     }
 )

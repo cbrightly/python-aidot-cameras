@@ -26,6 +26,17 @@ function each, all on default paths.
   stream removal on stop go through the same calls. The request sequence
   go2rtc sees is unchanged. The write lock may now be re-entered by the task
   holding it.
+- **Experimental, off by default: MQTT credentials the way the app fetches
+  them** (`AIDOT_MQTT_CONFIG2=1`). `GET /v25/commons/mqttConfig2` with
+  `sessionType=App` and a per-install 21-character `sessionId`, generated once
+  and kept in `<AIDOT_TOKEN_FILE>.mqtt-session-id`, or without a token file
+  in login_info as `mqttSessionId`, so it survives a Home Assistant restart. The reply's clientId, password and broker host are
+  used; on any failure the `/commons/userConfig` chain runs as before, and
+  `getServerUrlConfig` is still called for the SDES srflx address. One INFO
+  line names the source, with the clientId and sessionId masked. The hope is
+  a separate clientId per install, so Home Assistant, the CLI and the phone
+  stop evicting each other from the broker; that is unverified. Unset, nothing
+  changes.
 
 ### Changed
 - **One MQTT connection, and no fallback that evicts it.** Commands, attribute
