@@ -334,6 +334,16 @@ KNOBS: "dict[str, Knob]" = _registry(
     Knob("AIDOT_ABANDONED_MEDIA_GRACE_S", 8.0, "float", reject_below=0.0),
     Knob("AIDOT_BATTERY_STALE_OFFER_GRACE_S", 15.0, "float"),
     Knob("AIDOT_SDES_NO_MEDIA_GRACE_S", 20.0, "float"),
+    # Deprecated and ignored; sdes_open.py warns once when one is set.
+    Knob("AIDOT_SDES_ECHO_WAIT_S", None, "str", note="deprecated, ignored"),
+    Knob(
+        "AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S",
+        20.0,
+        "float",
+        note="deprecated, ignored",
+    ),
+    Knob("AIDOT_SDES_ANSWER_PROBE_GRACE_S", 20.0, "float", note="deprecated, ignored"),
+    Knob("AIDOT_SDES_TRIGGER_GRACE_S", 20.0, "float", note="deprecated, ignored"),
     Knob("AIDOT_PINNED_CODEC_RETRIES", 2, "int", reject_below=0),
     Knob(
         "AIDOT_SDES_SERVE_AUDIO",

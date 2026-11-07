@@ -1138,6 +1138,36 @@ _BATTERY_STALE_OFFER_GRACE_S = settings.read("AIDOT_BATTERY_STALE_OFFER_GRACE_S"
 # ``settings``); 0 restores the full-budget wait.
 _NO_MEDIA_GRACE_S = settings.read("AIDOT_SDES_NO_MEDIA_GRACE_S")
 
+# Knobs whose paths are gone (the webrtcReq-echo wait, and the three rules the
+# no-media timer replaced), still accepted and ignored: one warning per process
+# when any is set.
+_DEPRECATED_SDES_KNOBS = (
+    "AIDOT_SDES_ECHO_WAIT_S",
+    "AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S",
+    "AIDOT_SDES_ANSWER_PROBE_GRACE_S",
+    "AIDOT_SDES_TRIGGER_GRACE_S",
+)
+_deprecated_knobs_warned = False
+
+
+def _warn_deprecated_knobs(env: Optional[dict] = None) -> None:
+    """Log once per process that a deprecated, ignored knob is set."""
+    global _deprecated_knobs_warned
+    if _deprecated_knobs_warned:
+        return
+    _set = [n for n in _DEPRECATED_SDES_KNOBS if settings.is_set(n, env)]
+    if not _set:
+        return
+    _deprecated_knobs_warned = True
+    _LOGGER.warning(
+        "%s: deprecated and ignored. The SDES open no longer waits for a"
+        " webrtcReq echo, and abandons a first-media wait on one timer,"
+        " AIDOT_SDES_NO_MEDIA_GRACE_S (no media that long after the answer);"
+        " unset %s.",
+        ", ".join(_set),
+        "it" if len(_set) == 1 else "them",
+    )
+
 
 def _sd_session_mode(sd_playback) -> int:
     """The SESSION_MODE the data channel opens with: LIVING, or SD for playback.
@@ -6079,6 +6109,7 @@ async def _sdes_open_head(self, ps: _SdesOpenState) -> None:
     # object, not the open, so a marker older than this belongs to a
     # previous open and must not fire this one's early exit.
     ps._open_started_at = time.monotonic()
+    _warn_deprecated_knobs()
     # Stop the MQTT signaling thread on ANY abnormal exit from this impl.
     # The explicit `outgoing_q.put_nowait(None)` calls further down cover the
     # paths that existed when they were written, but an exception raised

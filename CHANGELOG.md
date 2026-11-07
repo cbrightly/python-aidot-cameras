@@ -26,6 +26,13 @@ three; both supported SDES models (A001513, A001064) need a live check.
   2026-09-22 to 10-09, every one of 165 first medias arrived within 9.5 s of
   `webrtcReq`.
 
+### Deprecated
+- `AIDOT_SDES_ECHO_WAIT_S`, `AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S`,
+  `AIDOT_SDES_ANSWER_PROBE_GRACE_S` and `AIDOT_SDES_TRIGGER_GRACE_S` are still
+  accepted and are ignored; one warning per process names any that are set.
+  The echo wait is gone, and the three graces are replaced by
+  `AIDOT_SDES_NO_MEDIA_GRACE_S`.
+
 ### Removed
 - **The SDES `webrtcReq`-echo wait, the `webrtcResp` built from it, and the
   quickConn retry that re-sent it.** The official app never publishes a
@@ -45,13 +52,13 @@ three; both supported SDES models (A001513, A001064) need a live check.
   (`-50002`/`-50015`) is still raised as `AidotCameraBusy`.
 - **The RTP/SAVP serve, where ffmpeg decrypted SDES media from our offer's
   keys.** Every supported SDES model is in `_PLAIN_RTP_MODELS`, where the bridge
-  decrypts and ffmpeg reads plain RTP. An SDES camera of any other model
-  (A001108 and A001360 are recognised but have never been seen live) now fails
-  at the start of the open with `AidotStreamOpenError` naming the model, before
-  an offer is sent, instead of opening a session nothing could decrypt.
-- `AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S`, `AIDOT_SDES_ANSWER_PROBE_GRACE_S`
-  and `AIDOT_SDES_TRIGGER_GRACE_S`, replaced by `AIDOT_SDES_NO_MEDIA_GRACE_S`.
-  A value set for the old names is ignored.
+  decrypts and ffmpeg reads plain RTP. An SDES camera of any other model now
+  fails at the start of the open with `AidotStreamOpenError` naming the model,
+  before an offer is sent, instead of opening a session nothing could decrypt.
+  **This includes the A001108 and A001360 battery cameras:** they are
+  recognised and flagged SDES but have never been seen live, and they now
+  refuse every stream open with that named error until their framing is
+  confirmed and they are added to `_PLAIN_RTP_MODELS`.
 
 ## [1.0.0rc71]
 

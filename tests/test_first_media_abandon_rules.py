@@ -193,3 +193,47 @@ def test_tutk_framed_media_is_counted_for_the_no_media_rule():
         and c not in set(ast.walk(bridge))
     ]
     assert readers, "nothing outside the bridge reads the TUTK media count"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "AIDOT_SDES_ECHO_WAIT_S",
+        "AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S",
+        "AIDOT_SDES_ANSWER_PROBE_GRACE_S",
+        "AIDOT_SDES_TRIGGER_GRACE_S",
+    ],
+)
+def test_a_removed_knob_is_named_once_per_process(name, monkeypatch, caplog):
+    import logging
+
+    from aidot_cameras import settings
+    from aidot_cameras.camera import sdes_open
+
+    assert "deprecated" in settings.KNOBS[name].note
+    monkeypatch.setattr(sdes_open, "_deprecated_knobs_warned", False)
+    with caplog.at_level(logging.WARNING, logger=sdes_open._LOGGER.name):
+        sdes_open._warn_deprecated_knobs({name: "5"})
+        sdes_open._warn_deprecated_knobs({name: "5"})
+    lines = [r.getMessage() for r in caplog.records if "deprecated" in r.getMessage()]
+    assert len(lines) == 1 and name in lines[0]
+
+
+def test_nothing_is_logged_when_no_removed_knob_is_set(monkeypatch, caplog):
+    import logging
+
+    from aidot_cameras.camera import sdes_open
+
+    monkeypatch.setattr(sdes_open, "_deprecated_knobs_warned", False)
+    with caplog.at_level(logging.WARNING, logger=sdes_open._LOGGER.name):
+        sdes_open._warn_deprecated_knobs({})
+    assert not caplog.records
+    assert sdes_open._deprecated_knobs_warned is False
+
+
+def test_the_open_checks_for_removed_knobs():
+    from tests.ast_guards import calls_to, sdes_open_family
+
+    assert [
+        c for fn in sdes_open_family() for c in calls_to(fn, "_warn_deprecated_knobs")
+    ]
