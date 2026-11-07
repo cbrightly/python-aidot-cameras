@@ -113,6 +113,20 @@ function each, all on default paths.
   tick, and the off-subnet warning. A camera that refuses (-50002/-50015) is
   still stopped by the first-media wait's check.
 
+- **One SDES TURN allocation, trickled after the offer.** The open made two
+  blocking TURN Allocates (audio and video, ~2-3 s) before it built the
+  offer. The offer now carries host and srflx candidates; after `webrtcReq`
+  one Allocate on the audio socket (the BUNDLE transport) runs and is
+  trickled as a relay candidate, while the camera works on the offer.
+  Packets the Allocate reads that are not its own (the camera may already be
+  probing) are answered by the STUN window instead of dropped. Connection
+  mode `relay` still allocates both sockets before the offer, since it puts
+  the relay in c=/m=; `lan` still skips the relay, never for a battery
+  camera. The elapsed time is logged as `signaling-wait[...] sdes-turn-alloc`.
+  The NAT hole-punch, including the fallback to the vendor relay host when
+  the cloud sends no TURN entry, is kept and now goes out before the
+  Allocate.
+
 ### Deprecated
 - **`AIDOT_PERSISTENT_MQTT`** is accepted and ignored; set to
   `0`/`false`/`no`/`off` it logs one warning. See above.
