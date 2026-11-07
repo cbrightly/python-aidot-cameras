@@ -3476,7 +3476,9 @@ class CameraMixin(
             # Every poll refetches (nothing is cached), so say it loudly
             # once per change and quietly after that.
             _level = (
-                logging.DEBUG if self._mqtt_url_refused_scheme == _plain else logging.ERROR
+                logging.DEBUG
+                if self._mqtt_url_refused_scheme == _plain
+                else logging.ERROR
             )
             self._mqtt_url_refused_scheme = _plain
             _LOGGER.log(

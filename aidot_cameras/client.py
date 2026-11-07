@@ -100,6 +100,7 @@ _MQTT_PASSWORD_RESPONSE_KEYS = ("mqttPassword", "mqqtPwd", "mqttPwd")
 # file takes precedence when AIDOT_TOKEN_FILE is set.
 _MQTT_SESSION_ID_KEY = "mqttSessionId"
 
+
 def _store_mqtt_credentials(
     login_info: dict,
     source: str,
@@ -808,7 +809,11 @@ class CameraClient(_UpstreamAidotClient):
             self._mqtt_config2_failure = "no host, clientId or password in the reply"
             return False
         _store_mqtt_credentials(
-            login_info, "mqttConfig2", reply["password"], reply["clientId"], reply["host"]
+            login_info,
+            "mqttConfig2",
+            reply["password"],
+            reply["clientId"],
+            reply["host"],
         )
         self._mqtt_config2_failure = None
         self._note_mqtt_credential_source(

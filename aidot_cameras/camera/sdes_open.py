@@ -1150,6 +1150,7 @@ _BATTERY_STALE_OFFER_GRACE_S = settings.read("AIDOT_BATTERY_STALE_OFFER_GRACE_S"
 # ``settings``); 0 restores the full-budget wait.
 _NO_MEDIA_GRACE_S = settings.read("AIDOT_SDES_NO_MEDIA_GRACE_S")
 
+
 def _sd_session_mode(sd_playback) -> int:
     """The SESSION_MODE the data channel opens with: LIVING, or SD for playback.
 

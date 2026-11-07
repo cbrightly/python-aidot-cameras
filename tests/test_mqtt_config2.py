@@ -554,7 +554,9 @@ def _cfg2_camera(host):
 
 
 def test_fallback_uses_the_config2_url_when_server_url_config_fails(on, monkeypatch):
-    monkeypatch.setattr(aiohttp, "ClientSession", lambda *a, **k: _FailingCamSession(None))
+    monkeypatch.setattr(
+        aiohttp, "ClientSession", lambda *a, **k: _FailingCamSession(None)
+    )
     cam = _cfg2_camera("cfg2.example:8443")
     assert asyncio.run(cam._async_get_mqtt_url()) == "wss://cfg2.example:8443/mqtt"
     assert cam._mqtt_url == "wss://cfg2.example:8443/mqtt"
@@ -562,7 +564,9 @@ def test_fallback_uses_the_config2_url_when_server_url_config_fails(on, monkeypa
 
 def test_a_plaintext_config2_fallback_is_refused_and_logged(on, monkeypatch, caplog):
     monkeypatch.delenv("AIDOT_ALLOW_PLAINTEXT_MQTT", raising=False)
-    monkeypatch.setattr(aiohttp, "ClientSession", lambda *a, **k: _FailingCamSession(None))
+    monkeypatch.setattr(
+        aiohttp, "ClientSession", lambda *a, **k: _FailingCamSession(None)
+    )
     cam = _cfg2_camera("ws://cfg2.example/mqtt")
     with caplog.at_level(logging.ERROR):
         assert asyncio.run(cam._async_get_mqtt_url()) is None
@@ -575,7 +579,9 @@ def test_a_plaintext_config2_fallback_is_refused_and_logged(on, monkeypatch, cap
 
 def test_a_plaintext_config2_fallback_takes_the_opt_in(on, monkeypatch):
     monkeypatch.setenv("AIDOT_ALLOW_PLAINTEXT_MQTT", "1")
-    monkeypatch.setattr(aiohttp, "ClientSession", lambda *a, **k: _FailingCamSession(None))
+    monkeypatch.setattr(
+        aiohttp, "ClientSession", lambda *a, **k: _FailingCamSession(None)
+    )
     cam = _cfg2_camera("ws://cfg2.example/mqtt")
     assert asyncio.run(cam._async_get_mqtt_url()) == "ws://cfg2.example/mqtt"
     assert cam._mqtt_url_refused_scheme is None
@@ -622,7 +628,9 @@ def test_the_private_write_leaves_the_old_file_on_failure(tmp_path):
     from aidot_cameras._private_file import write_private_file
 
     path = tmp_path / "f"
-    write_private_file(str(path), lambda fh: fh.write("one"), prefix=".t-", encoding="ascii")
+    write_private_file(
+        str(path), lambda fh: fh.write("one"), prefix=".t-", encoding="ascii"
+    )
     assert path.read_text() == "one"
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 

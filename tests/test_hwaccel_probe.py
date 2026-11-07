@@ -392,9 +392,7 @@ def test_the_encoder_verdict_is_cached_on_disk(monkeypatch, encoders):
 
 
 def test_an_implausible_encoder_is_never_spawned(monkeypatch, encoders):
-    monkeypatch.setattr(
-        hwaccel, "_plausible", lambda cand: cand[1] != "h264_v4l2m2m"
-    )
+    monkeypatch.setattr(hwaccel, "_plausible", lambda cand: cand[1] != "h264_v4l2m2m")
     tried = []
     monkeypatch.setattr(
         hwaccel, "_try_encoder", lambda name, codec: tried.append(name) or False
