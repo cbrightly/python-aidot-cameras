@@ -35,6 +35,16 @@ served (pull, stdout and RTSP push), once the reference installation runs it.
   and the same level normalizer before it; the AAC is now 64 kbit/s, as the
   direct publish's is. A recording's last partial AAC frame is flushed as it
   was.
+- **One publish sink for both direct publishers.** The DTLS and SDES
+  publishers each carried their own AAC feed and idle tick, video media clock,
+  HLS TS tee clock and AAC stats; both now hand what they publish to one
+  `PublishSink`. The SDES publisher still forwards the camera's packets as
+  they come rather than rebuilding frames, so a lost packet stays a glitch
+  and not a frozen frame. Two visible differences: the DTLS publish's AAC
+  line at the end of a session now reads like the SDES one (`AAC N frames /
+  N s / N silence-filled / N trimmed / N re-anchors, AAC start aligned +N
+  ms`), and a failure inside the in-sync HLS TS no longer ends a DTLS
+  publish (it never ended an SDES one).
 
 ## [1.0.0rc71]
 

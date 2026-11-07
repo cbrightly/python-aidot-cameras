@@ -324,8 +324,8 @@ re-sent frames dropped, N filter resets, AAC N frames / N s / N
 silence-filled / N trimmed / N re-anchors, AAC start aligned +N ms` when it
 stops (the AAC suffix is omitted when the track is off or unavailable). The
 aligned figure is `aac_align_ms` in `publish_stats()` (signed ms); the DTLS
-path puts the same key in its result and ends its own `DTLS direct
-publish: AAC ...` line with the same `AAC start aligned +N ms`. On a
+path puts the same key in its result and logs the same AAC summary in its
+own `DTLS direct publish: AAC N frames / ...` line. On a
 healthy LAN
 `late` and `lost` are 0; the repair count is normally 0 or near it; a steered
 snap or a filter reset adds one. `re-sent frames dropped` counts the
