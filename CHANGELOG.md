@@ -6,6 +6,41 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+- **The DTLS serve loop paces every failed open on one backoff.** Three
+  mechanisms did this before: a fixed 45 s retry after a busy refusal, a slow
+  probe that widened the interval to 600 s after five failures, and the
+  offline pause the SDES and JPEG keepalives use. Now one jittered backoff
+  runs from 15 s up to a 600 s cap, with a floor of `AIDOT_BUSY_RETRY_S`
+  (45 s) after a busy refusal or an ICE failure, and a camera the cloud
+  reports offline waits the cap at once, ending early (not before the floor)
+  when the cloud reports it back. A busy camera now climbs the backoff like
+  any other failure, so a camera held by another viewer for a long time is
+  retried up to 600 s apart rather than every 45 s. A camera that never
+  opens is retried somewhere in 15-600 s at the cap, not every 600 s, and
+  its WARNING drops to an INFO line every sixth failure there.
+- **One count decides when a DTLS camera's sessions are not worth
+  reopening.** A session fails when it ends within
+  `AIDOT_DTLS_SHORT_SESSION_S` (30 s) or is known to have delivered no
+  video; the rc71 wait after one (30 s, then 30-45 s) is unchanged, and a
+  session with no video canary and no watchdog verdict is still not counted.
+  After `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` (5) failures in a row the serve goes
+  dormant until the next view, as five video-less sessions already did. That
+  is new for sessions that keep dying short with video: they were reopened
+  every 30-45 s for as long as the keepalive ran. The count starts again with
+  each serve rather than carrying over from the last one.
+- **No fast retry for a DTLS camera whose encoder is still cold.** A
+  DC-only answer (`AidotCameraNotReady`) used to be retried four times 3 s
+  apart; it is now an ordinary failed open on the backoff above, which can
+  add up to about 12 s to a cold camera's first frame. The SDES wake-readiness
+  burst is unchanged.
+
+### Deprecated
+- `AIDOT_DTLS_SLOW_PROBE_THRESHOLD`, `AIDOT_DTLS_SLOW_PROBE_INTERVAL_S` and
+  `AIDOT_DTLS_SLOW_PROBE_LOG_EVERY` are still accepted and are ignored; one
+  warning per process names any that are set. `AIDOT_DTLS_SLOW_PROBE_CHUNK_S`
+  stays, now for every long wait of the serve loop.
+
 ## [1.0.0rc71]
 
 Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing on

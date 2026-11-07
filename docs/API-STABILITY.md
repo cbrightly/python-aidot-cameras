@@ -147,3 +147,9 @@ a minor release; fixes ship in a patch release.
 
 Deprecations get at least one minor release of overlap with a runtime warning
 before the old name is removed in the next major.
+
+Deprecated now:
+
+| Name | Since | What happens |
+| --- | --- | --- |
+| `AIDOT_DTLS_SLOW_PROBE_THRESHOLD`, `AIDOT_DTLS_SLOW_PROBE_INTERVAL_S`, `AIDOT_DTLS_SLOW_PROBE_LOG_EVERY` | [Unreleased] | accepted and ignored, with one warning per process when any is set; the DTLS serve loop paces failed opens on one backoff, 15 s up to 600 s (docs/ENVIRONMENT.md) |

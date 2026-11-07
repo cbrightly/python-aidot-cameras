@@ -9,14 +9,16 @@ accepted for the offer that never connected. Then it went offline.
 
 Pinned here:
 
-* a session that ends short (or never delivers video) is paced on its own
-  pacer, apart from the open-failure pacer: the loop waits 30 s after the
-  first, then jittered in [30, 45] s - never less than 30 s, never more than
-  45 s, so a pull the serve relay holds (90 s) is still there for the reopen;
+* a session that fails - ends short, or is known to have delivered no video -
+  is paced on its own pacer, apart from the open-failure pacer: the loop waits
+  30 s after the first, then jittered in [30, 45] s - never less than 30 s,
+  never more than 45 s, so a pull the serve relay holds (90 s) is still there
+  for the reopen; after AIDOT_DTLS_FUTILE_VIDEO_LIMIT failures in a row the
+  serve goes dormant;
 * a session that lasted and delivered video resets that pacer, however its
   last serve cycle ended;
-* open failures are paced exactly as before: a successful open resets them,
-  and short sessions never push a camera into the slow probe;
+* a successful open resets the open-failure pacer, and failed sessions never
+  push it up;
 * while it waits the loop keeps its concurrent-stream slot (as a failed-open
   wait does), does not claim to be serving, keeps renewing a battery
   camera's keep-alive, and returns quietly when cancelled, as its other
@@ -24,9 +26,11 @@ Pinned here:
   the serve cycle's alone;
 * a video-less session is paced once, as a short session, and does not also
   escalate the open-failure pacer;
-* an open whose ICE never connected is paced like any failed open (backoff,
-  slow probe, offline pause) with a floor of AIDOT_BUSY_RETRY_S that no early
-  return cuts; a shifted answer that did not connect keeps main's 3 s burst;
+* every failed open is on one pacer, 15 s up to 600 s; an open whose ICE
+  never connected, or a busy refusal, has a floor of AIDOT_BUSY_RETRY_S that
+  no early return cuts; a camera the cloud reports offline waits the cap,
+  ending early once it is back; a not-ready (encoder cold) is an ordinary
+  failed open;
 * a session's life is measured to when it stopped serving, not past its
   teardown.
 
@@ -52,7 +56,7 @@ import pytest
 from aidot_cameras import settings
 from aidot_cameras.camera import client as cc
 from aidot_cameras.camera import protocol
-from aidot_cameras.camera.client import _session_end_pacing
+from aidot_cameras.camera.client import _session_end_wait
 from aidot_cameras.camera.client import _video_has_started as _real_video_has_started
 from aidot_cameras.camera.protocol import ReconnectPacer
 from aidot_cameras.exceptions import (
@@ -76,8 +80,10 @@ def _pacer(r=1.0):
     return ReconnectPacer(30.0, 45.0, rand=lambda: r)
 
 
-def _pace(pacer, lived, *, video=True):
-    return _session_end_pacing(pacer, lived, had_video=video, threshold_s=30.0)
+def _pace(pacer, lived, *, video=True, limit=0):
+    return _session_end_wait(
+        pacer, lived, no_video=not video, threshold_s=30.0, limit=limit
+    )
 
 
 @pytest.mark.parametrize("r, waits", [(0.0, [30.0] * 6), (1.0, [30.0] + [45.0] * 5)])
@@ -99,6 +105,20 @@ def test_a_session_that_lasted_with_video_resets_the_pacer():
 
 def test_a_video_less_session_is_short_however_long_it_ran_pure():
     assert _pace(_pacer(), 600.0, video=False) == 30.0
+
+
+def test_the_limit_th_failure_in_a_row_stops_reopening_pure():
+    """Short and video-less sessions count alike; a session that lasted with
+    video starts the count again."""
+    p = _pacer()
+    assert _pace(p, 5.0, limit=3) == 30.0
+    assert _pace(p, 600.0, video=False, limit=3) == 45.0
+    assert _pace(p, 5.0, limit=3) is None
+    p = _pacer()
+    _pace(p, 5.0, limit=3)
+    _pace(p, 5.0, limit=3)
+    assert _pace(p, 120.0, limit=3) == 0.0
+    assert _pace(p, 5.0, limit=3) == 30.0
 
 
 def test_the_ice_failure_is_still_a_negotiation_failure():
@@ -312,7 +332,8 @@ class _Run:
                 await _real_sleep(0)
             run.now += sess.life - int(sess.life)
             ps._session_ended_at = run.now  # what the real cycle records
-            ps._session_had_video = sess.video
+            ps._session_video_seen = sess.video
+            ps._session_video_known = True
             ps.idle_release = sess.idle
             await sess.stop()
             run.ends.append(run.now)
@@ -378,6 +399,7 @@ def test_sessions_that_keep_dying_fast_wait_30_then_never_more_than_45(
     """At the top of the jitter: 30 s, then 45 s for as long as it goes on.
     45 s + a 16-25 s cold open + ~8 s to serve-ready stays inside the 90 s a
     pull is held by the serve relay."""
+    monkeypatch.setenv("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", "0")
     run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(8)]).run()
     assert run.gaps() == [30.0] + [45.0] * 7
 
@@ -435,7 +457,8 @@ def test_open_failures_before_a_session_do_not_survive_it(monkeypatch, cam):
     assert _opened_after(run)[-1] == 15.0
 
 
-def test_short_sessions_never_push_a_camera_into_the_slow_probe(monkeypatch, cam):
+def test_failed_sessions_never_escalate_the_open_pacer(monkeypatch, cam):
+    monkeypatch.setenv("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", "0")
     script = [_Sess(5.0) for _ in range(8)] + [AidotNegotiationFailed("x")]
     run = _Run(monkeypatch, cam, script).run()
     assert _opened_after(run)[-1] == 15.0
@@ -465,9 +488,9 @@ def test_the_wait_never_releases_the_camera(monkeypatch, cam, viewer):
     """Idle release is the serve cycle's alone. With the integration's 15 s
     battery window, shorter than any wait, a check after the wait would
     release a camera someone is watching; so there is none, whatever the
-    viewer state. The cost, accepted: a camera nobody watches whose sessions
-    keep dying fast is reopened every 30-45 s plus its session time until
-    its keepalive is stopped."""
+    viewer state. What bounds a camera nobody watches whose sessions keep
+    dying fast is the failure limit (off here, so every session reopens)."""
+    monkeypatch.setenv("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", "0")
     cam._stream_idle_opt = 15.0
     asked: list = []
     run = _Run(
@@ -479,6 +502,25 @@ def test_the_wait_never_releases_the_camera(monkeypatch, cam, viewer):
     assert not run.dormant
     assert len(run.opens) == 7
     assert asked == []
+
+
+@pytest.mark.parametrize("video", [True, False], ids=["short", "no video"])
+def test_the_limit_th_failed_session_in_a_row_goes_dormant(monkeypatch, cam, video):
+    """Five (the default limit) failed sessions in a row, short or video-less:
+    the fifth is not waited after, the serve goes dormant, and the sixth open
+    never happens."""
+    life = 5.0 if video else 600.0
+    run = _Run(monkeypatch, cam, [_Sess(life, video=video) for _ in range(8)]).run()
+    assert run.dormant == ["session abandon"]
+    assert len(run.opens) == 5
+    assert run.gaps() == [30.0, 45.0, 45.0, 45.0]
+
+
+def test_a_good_session_starts_the_failure_count_again(monkeypatch, cam):
+    script = [_Sess(5.0)] * 4 + [_Sess(120.0)] + [_Sess(5.0)] * 4
+    run = _Run(monkeypatch, cam, script).run()
+    assert not run.dormant
+    assert len(run.opens) == 10  # the script ran out on the tenth
 
 
 def test_battery_keep_alive_renewals_carry_on_through_the_wait(monkeypatch, cam):
@@ -516,23 +558,21 @@ def test_a_cancellation_in_the_wait_ends_the_loop_quietly(monkeypatch, cam):
 _ICE = AidotIceNotEstablished("ICE connection not established")
 
 
-def test_an_ice_failure_has_the_busy_floor_and_escalates_to_the_slow_probe(
-    monkeypatch, cam
-):
+def test_an_ice_failure_has_the_busy_floor_and_escalates_to_the_cap(monkeypatch, cam):
     """At least AIDOT_BUSY_RETRY_S each time, then the pacer's own backoff,
-    then the slow probe after five failures."""
-    run = _Run(monkeypatch, cam, [_ICE] * 6).run()
-    assert _opened_after(run) == [_BUSY, _BUSY, 60.0, 120.0, 600.0, 600.0]
+    up to its 600 s cap."""
+    run = _Run(monkeypatch, cam, [_ICE] * 8).run()
+    assert _opened_after(run) == [_BUSY, _BUSY, 60.0, 120.0, 240.0, 480.0, 600.0, 600.0]
 
 
-def test_the_busy_floor_holds_in_a_short_slow_probe_too(monkeypatch, cam):
-    """At the bottom of the jitter every failed open waits 15 s; with the
-    slow-probe interval set to 20 s, an ICE failure still waits 45 s."""
-    monkeypatch.setattr(cc, "_SLOW_PROBE_INTERVAL_S", 20.0)
-    run = _Run(monkeypatch, cam, [_ICE] * 8)
+@pytest.mark.parametrize("exc", [_ICE, AidotCameraBusy(-50002)], ids=["ice", "busy"])
+def test_the_busy_floor_holds_at_the_bottom_of_the_jitter(monkeypatch, cam, exc):
+    """At the bottom of the jitter every failed open would wait 15 s; an ICE
+    failure or a busy refusal still waits 45 s."""
+    run = _Run(monkeypatch, cam, [exc] * 6)
     monkeypatch.setattr(protocol, "random", types.SimpleNamespace(random=lambda: 0.0))
     run.run()
-    assert _opened_after(run) == [_BUSY] * 8
+    assert _opened_after(run) == [_BUSY] * 6
 
 
 def test_another_negotiation_failure_keeps_the_ordinary_backoff(monkeypatch, cam):
@@ -541,10 +581,31 @@ def test_another_negotiation_failure_keeps_the_ordinary_backoff(monkeypatch, cam
     assert _opened_after(run)[0] == 15.0 < _BUSY
 
 
-def test_the_ice_floor_survives_an_offline_pause_that_ends_early(monkeypatch, cam):
-    """The offline pause would hold for AIDOT_OFFLINE_PROBE_S, but returns
-    the moment the camera is back online; the busy floor still holds."""
-    monkeypatch.setattr(cc, "_OFFLINE_RECHECK_S", 5.0)
+def test_an_offline_camera_waits_the_cap(monkeypatch, cam):
+    """The cloud says it is gone: the first failure already waits 600 s."""
+    cam.status.online = False
+    cam._cloud_online_explicit = True
+    bad = AidotNegotiationFailed("no answer")
+    run = _Run(monkeypatch, cam, [bad, bad]).run()
+    assert _opened_after(run) == [600.0, 600.0]
+
+
+def test_an_offline_wait_ends_once_the_camera_is_back(monkeypatch, cam):
+    cam.status.online = False
+    cam._cloud_online_explicit = True
+
+    def _back_online(run):
+        if run.now >= 1100.0:
+            cam.status.online = True
+
+    bad = AidotNegotiationFailed("no answer")
+    run = _Run(monkeypatch, cam, [bad, bad], on_sleep=_back_online).run()
+    assert _opened_after(run)[0] < 200.0
+
+
+def test_the_ice_floor_survives_an_offline_wait_that_ends_early(monkeypatch, cam):
+    """The offline wait would run to the cap, but ends the moment the camera
+    is back online; the busy floor still holds."""
     cam.status.online = False
     cam._cloud_online_explicit = True
 
@@ -555,23 +616,23 @@ def test_the_ice_floor_survives_an_offline_pause_that_ends_early(monkeypatch, ca
     assert _opened_after(run)[0] == _BUSY
 
 
-def test_the_ice_floor_survives_an_offline_probe_interval_shorter_than_it(
-    monkeypatch, cam
-):
-    """Still offline when a 10 s AIDOT_OFFLINE_PROBE_S elapses: the pause
-    falls through to a probe open, but not before the 45 s floor."""
-    monkeypatch.setattr(cc, "_OFFLINE_PROBE_S", 10.0)
-    cam.status.online = False
-    cam._cloud_online_explicit = True
-    run = _Run(monkeypatch, cam, [_ICE, _ICE]).run()
-    assert _opened_after(run)[0] == _BUSY
-
-
-def test_a_not_ready_still_bursts(monkeypatch, cam):
-    """Including a shifted answer that did not connect, as on main."""
+def test_a_not_ready_is_an_ordinary_failed_open(monkeypatch, cam):
+    """No fast burst: the pacer's 15 s, then its backoff."""
     nr = AidotCameraNotReady("cam")
-    run = _Run(monkeypatch, cam, [nr, nr]).run()
-    assert _opened_after(run)[0] == 3.0
+    run = _Run(monkeypatch, cam, [nr, nr, nr]).run()
+    assert _opened_after(run) == [15.0, 30.0, 60.0]
+
+
+def test_the_failed_open_line_goes_quiet_at_the_cap(monkeypatch, cam, caplog):
+    """A WARNING per failure while the backoff climbs; at the cap, INFO for
+    the first and every sixth after, DEBUG for the rest."""
+    bad = AidotNegotiationFailed("no answer")
+    with caplog.at_level("DEBUG", logger="aidot_cameras.camera.client"):
+        _Run(monkeypatch, cam, [bad] * 14).run()
+    lines = [r for r in caplog.records if "open failed for" in r.getMessage()]
+    assert [r.levelname for r in lines[:6]] == ["WARNING"] * 6
+    info = [i + 1 for i, r in enumerate(lines) if r.levelname == "INFO"]
+    assert info == [7, 13]
 
 
 # --------------------------------------------------------------------------- #
@@ -723,8 +784,7 @@ def test_a_lasting_session_is_judged_on_all_its_cycles(
 ):
     """Its first serve cycle delivers video and its second gives up on none:
     the session delivered video and lasted, so it is not short. A session
-    with no video in either cycle is. The futile-video count still counts
-    the video-less cycle either way."""
+    with no video in either cycle is."""
     monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.2")
     run = _real_cycle_run(monkeypatch, make_camera_device_client, first_cycle_video)
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
@@ -784,7 +844,7 @@ def test_a_video_less_session_does_not_also_escalate_the_open_pacer(
     msgs = [r.getMessage() for r in caplog.records]
     assert any("delivered no video" in m for m in msgs), msgs
     retries = [m for m in msgs if "open failed for" in m]
-    assert retries and "(retry 15s)" in retries[0], retries
+    assert retries and "(retry 15s;" in retries[0], retries
 
 
 class _SlowStopSession:
@@ -833,8 +893,9 @@ def test_a_session_is_measured_to_its_end_not_past_its_teardown(
 
 
 def test_the_short_session_line_is_throttled(monkeypatch, cam, caplog):
-    """INFO for the first short session and every
-    AIDOT_DTLS_SLOW_PROBE_LOG_EVERY-th (6) after it; DEBUG for the rest."""
+    """INFO for the first short session and every sixth after it; DEBUG for
+    the rest."""
+    monkeypatch.setenv("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", "0")
     with caplog.at_level("DEBUG", logger="aidot_cameras.camera.client"):
         _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(8)]).run()
     lines = [r for r in caplog.records if "before reopening" in r.getMessage()]
@@ -883,13 +944,13 @@ def test_the_busy_floor_stops_when_streaming_does(monkeypatch, cam):
 
 
 @pytest.mark.parametrize(
-    "offline, says", [(False, "(retry 45s)"), (True, "(retry after the offline pause)")]
+    "offline, says",
+    [(False, "(retry 45s;"), (True, "(retry in up to 600s, sooner once back online;")],
 )
 def test_the_failed_open_line_names_the_wait_that_runs(
     monkeypatch, cam, caplog, offline, says
 ):
     if offline:
-        monkeypatch.setattr(cc, "_OFFLINE_RECHECK_S", 5.0)
         cam.status.online = False
         cam._cloud_online_explicit = True
 
@@ -1077,5 +1138,4 @@ def test_a_keyframe_landing_during_the_stats_await_counts(
     # Not vacuous: the await happened, and the video landing in it counted.
     assert state["stats_calls"] >= 1
     assert cam._serve_video_canary == {"frames": 5, "keyframes": 1}
-    assert getattr(cam, "_futile_video_runs", 0) == 0
     assert not any("delivered no video" in m for m in msgs), msgs

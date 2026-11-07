@@ -366,8 +366,8 @@ def test_import_time_constants_come_from_the_registry():
     from aidot_cameras.camera import protocol, sdes_open
 
     assert camera_client._BUSY_BACKOFF_S == settings.default("AIDOT_BUSY_BACKOFF_S")
-    assert camera_client._SLOW_PROBE_THRESHOLD == settings.default(
-        "AIDOT_DTLS_SLOW_PROBE_THRESHOLD"
+    assert camera_client._SLOW_PROBE_SLEEP_CHUNK_S == settings.default(
+        "AIDOT_DTLS_SLOW_PROBE_CHUNK_S"
     )
     assert camera_client._SERVE_REORDER_QUEUE == settings.default(
         "AIDOT_SERVE_REORDER_QUEUE"
