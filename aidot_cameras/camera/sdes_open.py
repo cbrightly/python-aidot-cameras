@@ -918,7 +918,6 @@ def _should_direct_publish(
     rtsp_push_url,
     output_path,
     max_seconds,
-    plain_rtp: bool,
     video_pt=None,
     *,
     stream_settings=None,
@@ -930,12 +929,11 @@ def _should_direct_publish(
     recordings and snapshots (``output_path`` / ``max_seconds``) and the
     ``-f null`` decode drain keep ffmpeg. See docs/DESIGN-direct-publish.md.
 
-    And only when the bridge itself decrypts (``plain_rtp``): otherwise the
-    loopback ports would carry SRTP and the publisher would forward it still
-    encrypted - a stream go2rtc accepts and nobody can decode.  The SDES open
-    refuses any model outside ``_PLAIN_RTP_MODELS``, so the open always
-    passes True; the term stays so the precondition is stated where it is
-    relied on.
+    Precondition: the bridge itself decrypts, so the loopback ports carry
+    plain RTP. The SDES open refuses any model outside ``_PLAIN_RTP_MODELS``
+    before the offer is built, so every caller meets it; were the ports to
+    carry SRTP, the publisher would forward it still encrypted - a stream
+    go2rtc accepts and nobody can decode.
 
     And only for the codec the publisher is validated on. ``video_pt`` is what
     the serve SDP was narrowed to: 96 (H.264) is measured on seven cameras,
@@ -947,8 +945,7 @@ def _should_direct_publish(
     if video_pt is not None and video_pt != _DIRECT_PUBLISH_VIDEO_PT:
         return False
     return (
-        plain_rtp
-        and direct_publish_enabled(stream_settings)
+        direct_publish_enabled(stream_settings)
         and is_publishable_url(rtsp_push_url)
         and not output_path
         and not max_seconds
@@ -6060,7 +6057,6 @@ class _SdesOpenState:
     #: An SD playback request (``sd_playback.SdPlaybackStart``); None for live.
     sd_playback: "Any" = None
     _open_started_at: "Any" = dataclasses.field(init=False)  # head
-    _use_plain_rtp: "Any" = dataclasses.field(init=False)  # head
     _live_power_type: "Any" = dataclasses.field(init=False)  # head
     _live_p2p_cache: "Any" = dataclasses.field(init=False)  # head
     webrtc_req_topic: "Any" = dataclasses.field(init=False)  # head
@@ -6209,8 +6205,7 @@ async def _sdes_open_head(self, ps: _SdesOpenState) -> None:
     # cloud profile flags enableSdes, not the model) is refused here, before
     # the offer is built, rather than opened into a session nothing decrypts.
     _model_id = getattr(getattr(self, "info", None), "model_id", None) or ""
-    ps._use_plain_rtp = any(m in _model_id for m in self._PLAIN_RTP_MODELS)
-    if not ps._use_plain_rtp:
+    if not any(m in _model_id for m in self._PLAIN_RTP_MODELS):
         raise AidotStreamOpenError(
             f"camera {ps.device_id}: SDES model {_model_id or '?'} is not one"
             " whose media this library can decrypt (supported: "
@@ -8590,7 +8585,6 @@ class _SdesOpenMixin:
             ps.rtsp_push_url,
             output_path,
             max_seconds,
-            ps._use_plain_rtp,
             stream_settings=_settings,
         )
         _ab_grace = _post_abandon_media_grace_s(
@@ -8795,7 +8789,6 @@ class _SdesOpenMixin:
             ps.rtsp_push_url,
             output_path,
             max_seconds,
-            ps._use_plain_rtp,
             _keep_v,
             stream_settings=_settings,
         )

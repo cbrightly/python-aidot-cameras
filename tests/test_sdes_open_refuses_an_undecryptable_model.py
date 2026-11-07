@@ -43,7 +43,7 @@ def test_every_supported_sdes_model_is_one_the_bridge_decrypts():
 def test_a_supported_model_passes_the_head(model):
     ps = _ps()
     asyncio.run(_sdes_open_head(_camera(model), ps))
-    assert ps._use_plain_rtp is True
+    assert ps.webrtc_req_topic == "iot/v1/s/u1/IPC/webrtcReq"
 
 
 @pytest.mark.parametrize("model", ["LK.IPC.A001108", ""])

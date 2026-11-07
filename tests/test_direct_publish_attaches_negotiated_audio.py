@@ -66,9 +66,9 @@ def test_recordings_snapshots_and_h265_keep_ffmpeg():
     from aidot_cameras.camera.sdes_open import _should_direct_publish
 
     url = "rtsp://127.0.0.1:8554/cam"
-    assert not _should_direct_publish(url, "/tmp/x.mp4", None, True)
-    assert not _should_direct_publish(url, None, 5.0, True)
-    assert not _should_direct_publish(url, None, None, True, 97)
+    assert not _should_direct_publish(url, "/tmp/x.mp4", None)
+    assert not _should_direct_publish(url, None, 5.0)
+    assert not _should_direct_publish(url, None, None, 97)
 
 
 def test_the_open_decides_the_serve_before_the_audio_wait():
