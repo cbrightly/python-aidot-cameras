@@ -102,8 +102,9 @@ def test_the_direct_publisher_serving_from_the_answer_gets_nothing():
 
 
 def test_the_ffmpeg_serve_keeps_the_grace():
-    """The open passes serve_from_answer only under the direct-publish test,
-    so recordings, snapshots and the decode drain keep the grace."""
+    """The open passes serve_from_answer only from the serve plan the adopted
+    answer resolved, so recordings, snapshots, the decode drain and an H.265
+    answer keep the grace."""
     import ast
 
     from tests.ast_guards import calls_to, function, module_tree, names_in
@@ -116,16 +117,13 @@ def test_the_ffmpeg_serve_keeps_the_grace():
     assert "serve_from_answer" in kw
     expr = kw["serve_from_answer"]
     assert isinstance(expr, ast.BoolOp) and isinstance(expr.op, ast.And)
-    assert calls_to(expr, "_answer_ready")
-    # The eligibility excludes recordings and snapshots (output_path /
-    # max_seconds), and the codec term keeps an H.265 answer on ffmpeg.
-    assert "_dp_eligible" in names_in(expr)
-    assert "_DIRECT_PUBLISH_VIDEO_PT" in names_in(expr)
-    (elig,) = [
-        n
-        for n in ast.walk(impl)
-        if isinstance(n, ast.Assign)
-        and any(getattr(t, "id", None) == "_dp_eligible" for t in n.targets)
-    ]
-    (dp,) = calls_to(elig.value, "_should_direct_publish")
-    assert {"output_path", "max_seconds"} <= names_in(dp)
+    # A known codec the direct publisher takes; None (no answer, no pin) keeps
+    # the grace.
+    assert {"_direct_publish", "_serve_video_pt"} <= names_in(expr)
+    # The plan excludes recordings and snapshots (output_path / max_seconds),
+    # and its codec term keeps an H.265 answer on ffmpeg.
+    plan = function(impl, "_resolve_serve_plan")
+    (dp,) = calls_to(plan, "_should_direct_publish")
+    assert {"output_path", "max_seconds", "_serve_video_pt"} <= names_in(dp)
+    # Resolved when the answer is adopted.
+    assert calls_to(function(impl, "_on_answer"), "_resolve_serve_plan")

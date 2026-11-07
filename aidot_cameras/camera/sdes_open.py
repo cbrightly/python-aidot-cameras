@@ -6125,6 +6125,15 @@ class _SdesOpenState:
     _turn_install_permissions: "Any" = dataclasses.field(init=False)
     # the orchestrator, harvest_answer
     _dc_answer_has_app: "bool" = dataclasses.field(init=False)
+    # The answer's payload types, set as it is adopted (harvest_answer).
+    _answer_video_pt: "Optional[int]" = dataclasses.field(init=False)
+    _answer_audio_pt: "Optional[int]" = dataclasses.field(init=False)
+    # The serve plan: the video payload type the serve narrows to (observed,
+    # then pinned, then answer) and whether the direct publisher takes it.
+    # Resolved by the orchestrator when the answer is adopted, and again with
+    # the observed type at launch.
+    _serve_video_pt: "Optional[int]" = dataclasses.field(init=False)
+    _direct_publish: "bool" = dataclasses.field(init=False)
     # the orchestrator, harvest_answer
     _cam_key_audio: "str" = dataclasses.field(init=False)
     # the orchestrator, build_offer, harvest_answer
@@ -7343,19 +7352,37 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
         ps._status("SRTP detected - exiting STUN window, handing off to ffmpeg")
 
 
+def _sdp_section_lines(sdp: str, media: str) -> "list[str]":
+    """The lines of the first ``m=<media>`` section, its m= line included.
+
+    Empty when the SDP has no such section.
+    """
+    lines: "list[str]" = []
+    for ln in sdp.splitlines():
+        if ln.startswith(f"m={media}") or (lines and not ln.startswith("m=")):
+            lines.append(ln)
+        elif lines:
+            break
+    return lines
+
+
 def _sdes_key_from_sdp(sdp: str, media: str) -> str:
     """The inline key from the first a=crypto line in the named m-section."""
-    in_sec = False
-    for ln in sdp.splitlines():
-        if ln.startswith(f"m={media}"):
-            in_sec = True
-        elif ln.startswith("m=") and in_sec:
-            break
-        elif in_sec and ln.startswith("a=crypto:"):
+    for ln in _sdp_section_lines(sdp, media):
+        if ln.startswith("a=crypto:"):
             _m = re.search(r"inline:([A-Za-z0-9+/=]+)", ln)
             if _m:
                 return _m.group(1)
     return ""
+
+
+def _answer_sdp(fut) -> str:
+    """The SDP of the camera's answer; "" while ``fut`` holds none."""
+    if fut is None or not fut.done() or fut.cancelled():
+        return ""
+    if fut.exception() is not None:
+        return ""
+    return (fut.result() or {}).get("sdp", "") or ""
 
 
 def _adopt_answer_sdp(ps: "_SdesOpenState", sdp: str) -> None:
@@ -7363,27 +7390,22 @@ def _adopt_answer_sdp(ps: "_SdesOpenState", sdp: str) -> None:
     and the camera's SRTP keys.
 
     Runs once per open: before the bridge starts when the answer is already
-    in, otherwise from the first-media wait when it lands. Everything set here
-    is read by the bridge per packet (``get_srtp_key_audio``,
+    in, otherwise from ``answer_fut``'s done callback when it lands. Everything
+    set here is read by the bridge per packet (``get_srtp_key_audio``,
     ``get_cam_key_audio``, ``get_dc_answer_has_app``), so a late adoption
     takes effect at once. ``ps._sctp`` is updated in place: the bridge holds
-    that dict.
+    that dict. The answer's payload types are kept for the serve plan.
     """
     ps._pre_launch_answer_sdp = sdp
+    ps._answer_video_pt = video_pt_from_answer_sdp(sdp)
+    ps._answer_audio_pt = audio_pt_from_answer_sdp(sdp)
     _LOGGER.debug(
         "_open_sdes_stream: camera webrtcResp answer SDP (len=%d)",
         len(sdp),
     )
+    _dc_ans_lines = _sdp_section_lines(sdp, "application")
     # Probe result: did camera echo back m=application?
     if ps._dc_probe_fp:
-        _dc_ans_lines, _in_dc_sec = [], False
-        for _aln in sdp.splitlines():
-            if _aln.startswith("m=application"):
-                _in_dc_sec = True
-            elif _aln.startswith("m=") and _in_dc_sec:
-                break
-            if _in_dc_sec:
-                _dc_ans_lines.append(_aln)
         if _dc_ans_lines:
             # The section carries the camera's a=crypto inline key
             # (the data channel's SRTP key); it is masked before this
@@ -7406,7 +7428,7 @@ def _adopt_answer_sdp(ps: "_SdesOpenState", sdp: str) -> None:
     # DataChannel.send (:9418).
     # Camera uses plain SCTP over UDP (same ICE port), no DTLS.
     # We are the SCTP client (proactive INIT), camera is server.
-    ps._dc_answer_has_app = "m=application" in sdp
+    ps._dc_answer_has_app = bool(_dc_ans_lines)
 
     ps._cam_key_audio = _sdes_key_from_sdp(sdp, "audio")
     _cam_key_video = _sdes_key_from_sdp(sdp, "video")
@@ -7444,6 +7466,10 @@ async def _sdes_open_harvest_answer(self, ps: _SdesOpenState) -> None:
     ps._our_tx_srtp_key_audio = ps.srtp_key_audio
     ps._cam_key_audio = ""  # camera's answer key; set by _adopt_answer_sdp
     ps._dc_answer_has_app = False  # set True if camera echoes m=application; init here so bridge closure never sees NameError on late-wake path
+    ps._answer_video_pt = None
+    ps._answer_audio_pt = None
+    ps._serve_video_pt = None
+    ps._direct_publish = False
     ps._sctp = {  # initialized here for the same reason - bridge closure
         "state": "CLOSED",  # INIT_SENT -> COOKIE_ECHOED -> ESTABLISHED -> DONE
         "local_tag": 0,  # our verification tag (sent in INIT)
@@ -7452,17 +7478,7 @@ async def _sdes_open_harvest_answer(self, ps: _SdesOpenState) -> None:
         "peer_tsn": 0,  # camera's Initial TSN (from its INIT/INIT-ACK)
         "stream_seq": 0,  # stream sequence number
     }
-    _pre_sdp = ""
-    if ps.answer_fut.done() and not ps.answer_fut.cancelled():
-        try:
-            _pre_sdp = (ps.answer_fut.result() or {}).get("sdp", "") or ""
-        except Exception:
-            _LOGGER.debug(
-                "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
-                "_sdes_open_harvest_answer",
-                exc_info=True,
-            )
+    _pre_sdp = _answer_sdp(ps.answer_fut)
     if _pre_sdp:
         _adopt_answer_sdp(ps, _pre_sdp)
     else:
@@ -8289,47 +8305,62 @@ class _SdesOpenMixin:
                 _cancelled=_cancelled,
             )
 
-        def _answer_ready() -> bool:
-            return bool(
-                ps.answer_fut is not None
-                and ps.answer_fut.done()
-                and not ps.answer_fut.cancelled()
-                and ps.answer_fut.exception() is None
+        _settings = settings.stream_settings_of(self)
+
+        def _resolve_serve_plan(observed_vpt) -> None:
+            """Which video type the serve narrows to, and whether the direct
+            publisher takes it: observed beats pinned beats answer (see
+            _serve_video_pt). Recordings, snapshots, the decode drain and an
+            H.265 session keep ffmpeg (see _should_direct_publish)."""
+            ps._serve_video_pt = _serve_video_pt(
+                observed_vpt,
+                ps._answer_video_pt,
+                _pinned_video_pt(ps.sd_playback, _settings),
+            )
+            ps._direct_publish = _should_direct_publish(
+                ps.rtsp_push_url,
+                output_path,
+                max_seconds,
+                ps._serve_video_pt,
+                stream_settings=_settings,
             )
 
-        # An answer that lands after the bridge started is applied once: in the
-        # first-media wait, right after it (video can end the wait in the same
-        # 0.1 s tick the answer lands in), or once the serve is up.
-        _answer_adopted = [bool(ps._pre_launch_answer_sdp)]
+        def _on_answer(_fut=None) -> None:
+            """Adopt an answer that lands after the bridge started, and resolve
+            the serve plan from it. Runs once, on the loop thread."""
+            if ps.answer_fut.cancelled() or ps.answer_fut.exception() is not None:
+                return
+            _late_sdp = "" if ps._pre_launch_answer_sdp else _answer_sdp(ps.answer_fut)
+            if _late_sdp:
+                # Keys first: the bridge reads them per packet, and its first
+                # USE-CANDIDATE from the credentials below should find them set.
+                _adopt_answer_sdp(ps, _late_sdp)
+                _la_u, _la_p, _la_c, _ = _parse_answer_ice(_late_sdp)
+                if _la_u and _la_p:
+                    _bridge_uc_info["ufrag"] = _la_u
+                    _bridge_uc_info["pwd"] = _la_p
+                    # Rebind, never append: the bridge iterates it. Trickled
+                    # candidates already there are kept.
+                    _bridge_uc_info["cands"] = [
+                        *_la_c,
+                        *(c for c in _bridge_uc_info["cands"] if c not in _la_c),
+                    ]
+                _warn_if_every_candidate_off_subnet(self.device_id, _la_c)
+                ps._status(
+                    "late webrtcResp answer applied %.1fs after the first-media wait"
+                    " began"
+                    " (%d candidate(s)) - the bridge nominates from it"
+                    % (time.monotonic() - _media_wait_started, len(_la_c))
+                    + (" [m=application present]" if ps._dc_answer_has_app else "")
+                )
+            _resolve_serve_plan(_first_video_pt[0])
 
-        def _adopt_late_answer() -> None:
-            if _answer_adopted[0] or not _answer_ready():
-                return
-            _answer_adopted[0] = True
-            _late_sdp = (ps.answer_fut.result() or {}).get("sdp", "") or ""
-            if not _late_sdp:
-                return
-            # Keys first: the bridge reads them per packet, and its first
-            # USE-CANDIDATE from the credentials below should find them set.
-            _adopt_answer_sdp(ps, _late_sdp)
-            _la_u, _la_p, _la_c, _ = _parse_answer_ice(_late_sdp)
-            if _la_u and _la_p:
-                _bridge_uc_info["ufrag"] = _la_u
-                _bridge_uc_info["pwd"] = _la_p
-                # Rebind, never append: the bridge iterates it. Trickled
-                # candidates already there are kept.
-                _bridge_uc_info["cands"] = [
-                    *_la_c,
-                    *(c for c in _bridge_uc_info["cands"] if c not in _la_c),
-                ]
-            _warn_if_every_candidate_off_subnet(self.device_id, _la_c)
-            ps._status(
-                "late webrtcResp answer applied %.1fs after the first-media wait"
-                " began"
-                " (%d candidate(s)) - the bridge nominates from it"
-                % (time.monotonic() - _media_wait_started, len(_la_c))
-                + (" [m=application present]" if ps._dc_answer_has_app else "")
-            )
+        if ps.answer_fut.done():
+            _on_answer()
+        else:
+            ps.answer_fut.add_done_callback(_on_answer)
+            # An open that fails first must not adopt into a dead session.
+            ps._cl(ps.answer_fut.remove_done_callback, _on_answer)
 
         _sd_start_waiter = None
         # Before PLAY_START can go out, so a short clip's end is not missed.
@@ -8473,9 +8504,6 @@ class _SdesOpenMixin:
                         " - terminal, abandoning the first-media wait"
                     )
                     raise AidotCameraBusy(_code, _desc)
-                # Keys first, then the credentials the bridge nominates with
-                # (the nomination peek below follows in this same pass).
-                _adopt_late_answer()
                 if (
                     not _pt_kinds_read
                     and ps.answer_fut is not None
@@ -8487,28 +8515,23 @@ class _SdesOpenMixin:
                     # 75 s too late for the demux that the map exists to fix.
                     _pt_kinds_read = True
                     try:
-                        if ps.answer_fut.exception() is None:
-                            _pk_sdp = (ps.answer_fut.result() or {}).get(
-                                "sdp", ""
-                            ) or ""
-                            _sd_unservable = _sd_playback_unservable(
-                                ps.sd_playback, _pk_sdp
+                        _pk_sdp = _answer_sdp(ps.answer_fut)
+                        _sd_unservable = _sd_playback_unservable(
+                            ps.sd_playback, _pk_sdp
+                        )
+                        if _pk_sdp:
+                            _answer_pt_kinds.update(answer_pt_kinds(_pk_sdp))
+                            _answer_video_pt[0] = video_pt_from_answer_sdp(_pk_sdp)
+                            _vpts = sorted(
+                                pt for pt, k in _answer_pt_kinds.items() if k == "video"
                             )
-                            if _pk_sdp:
-                                _answer_pt_kinds.update(answer_pt_kinds(_pk_sdp))
-                                _answer_video_pt[0] = video_pt_from_answer_sdp(_pk_sdp)
-                                _vpts = sorted(
-                                    pt
-                                    for pt, k in _answer_pt_kinds.items()
-                                    if k == "video"
+                            if any(pt not in _SDP_VIDEO_PTS for pt in _vpts):
+                                ps._status(
+                                    "answer numbers video on payload"
+                                    " type(s) %s - demuxing by the answer,"
+                                    " serving as our pt=%s"
+                                    % (_vpts, _answer_video_pt[0])
                                 )
-                                if any(pt not in _SDP_VIDEO_PTS for pt in _vpts):
-                                    ps._status(
-                                        "answer numbers video on payload"
-                                        " type(s) %s - demuxing by the answer,"
-                                        " serving as our pt=%s"
-                                        % (_vpts, _answer_video_pt[0])
-                                    )
                     except Exception:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
@@ -8525,27 +8548,10 @@ class _SdesOpenMixin:
                             "the camera's answer has no data channel, so the"
                             " recording cannot be asked to play"
                         )
-                if (
-                    not _early_nominated
-                    and ps.answer_fut is not None
-                    and ps.answer_fut.done()
-                    and not ps.answer_fut.cancelled()
-                ):
-                    # Read-only peek: the real await below still consumes this
-                    # future and drives the answer/fallback paths unchanged.
-                    # ``cancelled()`` is checked explicitly because the answer-wait
-                    # cancels this future on timeout, and ``.exception()`` on a
-                    # cancelled future raises CancelledError - a BaseException that
-                    # the ``except Exception`` below would NOT catch.
-                    _peek_sdp = ""
-                    try:
-                        if ps.answer_fut.exception() is None:
-                            _peek_sdp = (ps.answer_fut.result() or {}).get(
-                                "sdp", ""
-                            ) or ""
-                    except Exception:
-                        _peek_sdp = ""
-                    _n_nom = ps._nominate_from_answer_sdp(_peek_sdp)
+                if not _early_nominated and ps._pre_launch_answer_sdp:
+                    # The adopted answer, so its keys are set before the
+                    # bridge nominates from its credentials.
+                    _n_nom = ps._nominate_from_answer_sdp(ps._pre_launch_answer_sdp)
                     if _n_nom:
                         _early_nominated = True
                         ps._status(
@@ -8578,31 +8584,14 @@ class _SdesOpenMixin:
         # arrived" WARNING for it would contradict that report's own invariant -
         # "an open that delivers media reaches none of it" - and poison the
         # signal this camera family is triaged with.
-        _settings = settings.stream_settings_of(self)
-        # A live push the direct publisher may take, whatever the codec;
-        # recordings, snapshots and the decode drain never are.
-        _dp_eligible = _should_direct_publish(
-            ps.rtsp_push_url,
-            output_path,
-            max_seconds,
-            stream_settings=_settings,
-        )
         _ab_grace = _post_abandon_media_grace_s(
             abandoned=_stale_offer_abandoned,
             have_video=_first_video_pt[0] is not None,
             grace_s=_abandoned_media_grace_s(),
-            # ...and only for the codec it serves: an answer naming H.265
-            # (with the pin off) keeps ffmpeg, and ffmpeg keeps the grace.
-            serve_from_answer=_dp_eligible
-            and _answer_ready()
-            and _serve_video_pt(
-                None,
-                video_pt_from_answer_sdp(
-                    (ps.answer_fut.result() or {}).get("sdp", "") or ""
-                ),
-                _pinned_video_pt(ps.sd_playback, _settings),
-            )
-            == _DIRECT_PUBLISH_VIDEO_PT,
+            # The plan from the adopted answer: a known codec the direct
+            # publisher takes. Recordings, snapshots and an H.265 answer (with
+            # the pin off) keep ffmpeg, and ffmpeg keeps the grace.
+            serve_from_answer=ps._direct_publish and ps._serve_video_pt is not None,
         )
         if _ab_grace > 0:
             _ab_t0 = time.monotonic()
@@ -8645,7 +8634,6 @@ class _SdesOpenMixin:
                 ps._status(
                     "no media in the %.0fs after the wait was abandoned" % _ab_grace
                 )
-        _adopt_late_answer()
         if _first_video_pt[0] is None:
             # The wait expired with nothing received. Everything needed to
             # say why is in hand at exactly this moment and was, until the
@@ -8739,21 +8727,8 @@ class _SdesOpenMixin:
             # ffmpeg bind the wrong depacketizer, and makes the RTSP-push
             # ANNOUNCE carry a parameterless H.265 stream that go2rtc rejects
             # outright - no publisher, and every viewer sees a 404.
-            try:
-                if ps.answer_fut.exception() is None:
-                    _answer_video_pt[0] = video_pt_from_answer_sdp(
-                        (ps.answer_fut.result() or {}).get("sdp", "") or ""
-                    )
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_open_sdes_stream_impl",
-                    exc_info=True,
-                )
-            _pin_pt = _pinned_video_pt(
-                ps.sd_playback, settings.stream_settings_of(self)
-            )
+            _answer_video_pt[0] = ps._answer_video_pt
+            _pin_pt = _pinned_video_pt(ps.sd_playback, _settings)
             if _pin_pt is not None:
                 _LOGGER.info(
                     "camera %s: the observed payload type is not one this SDP "
@@ -8771,28 +8746,17 @@ class _SdesOpenMixin:
                     getattr(self, "device_id", "?"),
                     _answer_video_pt[0],
                 )
-        # observed beats pinned beats answer -- see _serve_video_pt.  The pin
-        # matters here: this camera answers H.265 and sends H.264, so trusting
-        # the answer built an hevc-only SDP and killed the serve at startup.
-        _keep_v = _serve_video_pt(
-            _vpt,
-            _answer_video_pt[0],
-            _pinned_video_pt(ps.sd_playback, settings.stream_settings_of(self)),
-        )
+        # The serve plan, now with the observed type (see _resolve_serve_plan).
         # Direct publish (AIDOT_DIRECT_PUBLISH): an in-process RTSP publisher
         # replaces the push ffmpeg. It reads the same narrowed SDP and the same
         # loopback ports and is Popen-compatible, so everything below that
-        # polls, terminates, reaps or relaunches `proc` is unchanged. Only a
-        # live push qualifies - recordings, snapshots and the decode drain keep
-        # ffmpeg. See docs/DESIGN-direct-publish.md.
-        _direct_publish = _should_direct_publish(
-            ps.rtsp_push_url,
-            output_path,
-            max_seconds,
-            _keep_v,
-            stream_settings=_settings,
-        )
-        if _dp_eligible and not _direct_publish:
+        # polls, terminates, reaps or relaunches `proc` is unchanged. See
+        # docs/DESIGN-direct-publish.md.
+        _resolve_serve_plan(_vpt)
+        _keep_v = ps._serve_video_pt
+        if not ps._direct_publish and _should_direct_publish(
+            ps.rtsp_push_url, output_path, max_seconds, stream_settings=_settings
+        ):
             _LOGGER.info(
                 "camera %s: this session negotiated video pt=%s, which the"
                 " direct publisher is not validated for; keeping the ffmpeg"
@@ -8808,12 +8772,10 @@ class _SdesOpenMixin:
         # packets never come does not hold up the video.
         _answer_apt = None
         _answer_pt = None
-        if _serve_audio and _first_audio_pt[0] is None and _answer_ready():
-            _answer_pt = audio_pt_from_answer_sdp(
-                (ps.answer_fut.result() or {}).get("sdp", "") or ""
-            )
+        if _serve_audio and _first_audio_pt[0] is None:
+            _answer_pt = ps._answer_audio_pt
         _apt_wait = _audio_pt_wait_s(
-            direct_publish=_direct_publish, answer_apt=_answer_pt
+            direct_publish=ps._direct_publish, answer_apt=_answer_pt
         )
         if _serve_audio and _first_audio_pt[0] is None and _apt_wait > 0:
             _apt_deadline = time.monotonic() + _apt_wait
@@ -8821,7 +8783,7 @@ class _SdesOpenMixin:
                 await asyncio.sleep(0.1)
         if _first_audio_pt[0] is None and _answer_pt is not None:
             _answer_apt = _answer_pt
-            if _direct_publish:
+            if ps._direct_publish:
                 _LOGGER.info(
                     "camera %s: direct publish: attaching audio pt=%d from the"
                     " camera's answer (no audio packet seen yet)",
@@ -8944,7 +8906,7 @@ class _SdesOpenMixin:
             Home Assistant flags a blocking `open()` in the event loop and it
             is a real stall, however short.
             """
-            if _direct_publish:
+            if ps._direct_publish:
                 _dp_sdp = await asyncio.get_running_loop().run_in_executor(
                     None, _read_sdp_file
                 )
@@ -8972,7 +8934,7 @@ class _SdesOpenMixin:
 
         # Do not launch the publisher into a listener that is not up yet.
         await _await_rtsp_publish_target(ps.rtsp_push_url)
-        if _direct_publish:
+        if ps._direct_publish:
             _LOGGER.info(
                 "camera %s: SDES serve: direct RTSP publish (no ffmpeg)%s",
                 getattr(self, "device_id", "?"),
@@ -8984,7 +8946,7 @@ class _SdesOpenMixin:
                 "SDES ffmpeg cmd: %s",
                 " ".join(redact_url(t) if "://" in t else t for t in cmd),
             )
-        if not _direct_publish and _ffmpeg_path() is None:
+        if not ps._direct_publish and _ffmpeg_path() is None:
             # ffmpeg is not installed - clean up and surface a clear error
             # before launching (avoids a cryptic FileNotFoundError).
             # The sockets and the SDP file are released by the exit stack as this raises.
@@ -9095,10 +9057,6 @@ class _SdesOpenMixin:
                 "webrtcResp received (SDES) - answer m-sections (%d): %s"
                 % (len(_ans_mlines), " | ".join(_ans_mlines))
             )
-            # An answer that landed after the first-media wait ended (a camera
-            # that streams before it answers) is applied now: keys, the
-            # data-channel flag, and the credentials for the bridge's tick.
-            _adopt_late_answer()
             # A later webrtcResp from the camera, if one is already in hand, may
             # carry a different SRTP key.  The bridge is the only decryptor and
             # reads srtp_key_audio per packet (it rebuilds its receive session

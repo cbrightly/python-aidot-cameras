@@ -1602,13 +1602,13 @@ def test_the_open_passes_the_negotiated_codec_through():
         for fn in sdes_open_family()
         for n in ast.walk(fn)
         if isinstance(n, ast.Assign)
-        and any(getattr(t, "id", None) == "_direct_publish" for t in n.targets)
+        and any(getattr(t, "attr", None) == "_direct_publish" for t in n.targets)
         and calls_to(n.value, "_should_direct_publish")
     ]
     assert len(decisions) == 1, "the open's direct-publish decision moved"
     args = decisions[0].args
     assert len(args) == 4
-    assert "_keep_v" in names_in(args[3])
+    assert "_serve_video_pt" in names_in(args[3])
 
 
 def test_the_sdes_serve_launch_goes_through_the_spawn_helper():

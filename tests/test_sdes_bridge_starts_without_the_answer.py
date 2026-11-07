@@ -92,7 +92,7 @@ def test_a_late_answer_is_applied_for_the_bridge():
     from tests.ast_guards import calls_to, function
 
     impl = function(_tree(), "_open_sdes_stream_impl")
-    adopt = function(impl, "_adopt_late_answer")
+    adopt = function(impl, "_on_answer")
     assert calls_to(adopt, "_adopt_answer_sdp")
     assert calls_to(adopt, "_warn_if_every_candidate_off_subnet")
     writes = {
@@ -107,26 +107,34 @@ def test_a_late_answer_is_applied_for_the_bridge():
     assert {"ufrag", "pwd", "cands"} <= writes
 
 
-def test_it_is_applied_in_the_wait_after_it_and_after_the_serve_starts():
-    """Video can end the wait in the same 0.1 s tick the answer lands in, and a
-    camera that streams before it answers ends it with no answer at all; both
-    still need the camera's SRTP key adopted."""
+def test_it_is_applied_when_the_answer_future_completes():
+    """Whenever the answer lands - in the wait, as it ends, or once the serve
+    is up - the future's own done callback applies it, once. An answer that is
+    already in when the open gets there is applied at once, and a callback
+    still pending when the open fails is withdrawn."""
     from tests.ast_guards import calls_to, function, names_in
 
     impl = function(_tree(), "_open_sdes_stream_impl")
-    (main,) = [
+    adopt = function(impl, "_on_answer")
+    (register,) = [
+        c
+        for c in calls_to(impl, "add_done_callback")
+        if "answer_fut" in names_in(c.func)
+    ]
+    assert [getattr(a, "id", None) for a in register.args] == ["_on_answer"]
+    (branch,) = [
         n
         for n in ast.walk(impl)
-        if isinstance(n, ast.While)
-        and {"_first_video_pt", "_media_deadline"} <= names_in(n.test)
+        if isinstance(n, ast.If)
+        and register in ast.walk(n)
+        and "done" in names_in(n.test)
     ]
-    in_loop = calls_to(main, "_adopt_late_answer")
-    assert in_loop
-    after = [
-        c for c in calls_to(impl, "_adopt_late_answer") if c.lineno > main.end_lineno
-    ]
-    # The final (WARNING) stall report, not the ones in the cancel handlers.
-    stall = max(c.lineno for c in calls_to(impl, "_report_first_media_stall"))
-    serve = min(c.lineno for c in calls_to(impl, "_spawn_serve"))
-    assert any(main.end_lineno < c.lineno < stall for c in after)
-    assert any(c.lineno > serve for c in after)
+    assert any(
+        isinstance(c.func, ast.Name) and c.func.id == "_on_answer"
+        for st in branch.body
+        for c in calls_to(st, "_on_answer")
+    )
+    assert any("remove_done_callback" in names_in(c) for c in calls_to(impl, "_cl"))
+    # No poll is left: the closure is only ever called by that branch.
+    assert len(calls_to(impl, "_on_answer")) == 1
+    assert register.lineno > adopt.end_lineno
