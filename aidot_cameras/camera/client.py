@@ -2839,8 +2839,8 @@ class CameraMixin(
     # packets with a TUTK SFrame header (0xC8 audio / 0xC9 video) and an SSRC
     # that differs from the one advertised in the SDP.  For these the ffmpeg SDP
     # uses plain RTP/AVP (no SRTP decryption attempt) and the bridge strips the
-    # TUTK header before forwarding.  Matched by SUBSTRING (see _use_plain_rtp in
-    # sdes_open) so a revision suffix is covered.
+    # TUTK header before forwarding.  Matched by SUBSTRING so a revision suffix
+    # is covered; the SDES open refuses any other SDES model.
     _PLAIN_RTP_MODELS: frozenset = frozenset({"A001064", "A001513"})
 
     @property
