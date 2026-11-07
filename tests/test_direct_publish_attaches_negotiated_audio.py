@@ -66,37 +66,41 @@ def test_recordings_snapshots_and_h265_keep_ffmpeg():
     from aidot_cameras.camera.sdes_open import _should_direct_publish
 
     url = "rtsp://127.0.0.1:8554/cam"
-    assert not _should_direct_publish(url, "/tmp/x.mp4", None, True)
-    assert not _should_direct_publish(url, None, 5.0, True)
-    assert not _should_direct_publish(url, None, None, True, 97)
+    assert not _should_direct_publish(url, "/tmp/x.mp4", None)
+    assert not _should_direct_publish(url, None, 5.0)
+    assert not _should_direct_publish(url, None, None, 97)
 
 
 def test_the_open_decides_the_serve_before_the_audio_wait():
-    """The open reads the answer's audio PT, decides direct publish (video PT
-    included) BEFORE the audio wait, gates the wait on _audio_pt_wait_s with
-    that decision, and falls back to the answer's PT after the wait."""
+    """The adopted answer's audio PT is kept, the open resolves the serve plan
+    (video PT included) BEFORE the audio wait, gates the wait on
+    _audio_pt_wait_s with that decision, and falls back to the answer's PT
+    after the wait."""
     from tests.ast_guards import calls_to, function, module_tree, names_in
 
-    impl = function(
-        module_tree("aidot_cameras.camera.sdes_open"), "_open_sdes_stream_impl"
-    )
-    assert calls_to(impl, "audio_pt_from_answer_sdp"), (
+    tree = module_tree("aidot_cameras.camera.sdes_open")
+    assert calls_to(function(tree, "_adopt_answer_sdp"), "audio_pt_from_answer_sdp"), (
         "the open no longer reads the answer's audio PT"
     )
-    decide = [
+    impl = function(tree, "_open_sdes_stream_impl")
+    plan = function(impl, "_resolve_serve_plan")
+    (decide,) = [
         n
-        for n in ast.walk(impl)
+        for n in ast.walk(plan)
         if isinstance(n, ast.Assign)
-        and any(getattr(t, "id", None) == "_direct_publish" for t in n.targets)
+        and any(getattr(t, "attr", None) == "_direct_publish" for t in n.targets)
     ]
-    waits = calls_to(impl, "_audio_pt_wait_s")
-    assert len(decide) == 1 and len(waits) == 1
-    assert decide[0].lineno < waits[0].lineno
-    kw = {k.arg: k.value for k in waits[0].keywords}
-    assert getattr(kw.get("direct_publish"), "id", None) == "_direct_publish"
     # The decision includes the video PT, so an H.265 session takes the
     # ffmpeg rule.
-    assert "_keep_v" in names_in(decide[0].value)
+    assert "_serve_video_pt" in names_in(decide.value)
+    resolves = [
+        c for c in calls_to(impl, "_resolve_serve_plan") if c.lineno > plan.end_lineno
+    ]
+    waits = calls_to(impl, "_audio_pt_wait_s")
+    assert len(waits) == 1
+    assert any(c.lineno < waits[0].lineno for c in resolves)
+    kw = {k.arg: k.value for k in waits[0].keywords}
+    assert getattr(kw.get("direct_publish"), "attr", None) == "_direct_publish"
 
     loops = [
         n

@@ -5,8 +5,8 @@ before it built the offer. Now the offer carries host/srflx only, and one
 Allocate on the audio socket (the BUNDLE transport) runs after webrtcReq and
 is trickled as a relay candidate. Relay mode still allocates before the
 offer, because it puts the relay in c=/m=. The allocate reads the media
-socket, so anything it reads that is not its own response is kept for the
-STUN window rather than dropped: the camera may already be probing.
+socket, so a STUN packet it reads that is not its own response is kept for
+the STUN window rather than dropped: the camera may already be probing.
 """
 
 import ast
@@ -14,7 +14,11 @@ import socket
 import struct
 import threading
 
-from aidot_cameras.camera.sdes_open import STUN_MAGIC_COOKIE, turn_allocate_udp
+from aidot_cameras.camera.sdes_open import (
+    _TURN_STRAY_CAP,
+    STUN_MAGIC_COOKIE,
+    turn_allocate_udp,
+)
 from tests.ast_guards import calls_to, enclosing, function, module_tree, names_in
 from tests.ast_guards import name_of, parents
 
@@ -68,6 +72,31 @@ def test_packets_that_are_not_the_allocate_s_are_kept():
         t.join(2)
         assert res is not None and res[:2] == ("198.51.100.7", 50000)
         assert stray == [(probe, camera.getsockname())]
+    finally:
+        for s in (media, server, camera):
+            s.close()
+
+
+def test_only_stun_packets_are_kept_and_only_so_many():
+    """Media or junk read during the allocate is dropped, and a flood of probes
+    does not grow the replay without bound."""
+    media, server, camera = _udp(), _udp(), _udp()
+    try:
+        camera.sendto(b"\x80\x08" + b"\x00" * 30, media.getsockname())  # RTP
+        probes = [
+            b"\x00\x01\x00\x00" + STUN_MAGIC_COOKIE + b"%012d" % i
+            for i in range(_TURN_STRAY_CAP + 8)
+        ]
+        for probe in probes:
+            camera.sendto(probe, media.getsockname())
+        t = _fake_turn(server)
+        stray = []
+        res = turn_allocate_udp(
+            media, "127.0.0.1", server.getsockname()[1], b"u", b"p", stray
+        )
+        t.join(2)
+        assert res is not None
+        assert [p for p, _ in stray] == probes[:_TURN_STRAY_CAP]
     finally:
         for s in (media, server, camera):
             s.close()

@@ -106,7 +106,7 @@ def test_each_read_site_follows_the_rule(monkeypatch):
     assert aac_track.make_aac_track("cam", off) is None
     assert hls_ts.enabled(off) is False
     assert not sdes_open._should_direct_publish(
-        URL, None, None, True, stream_settings=off
+        URL, None, None, stream_settings=off
     )
     pin_off = StreamSettings(sdes_video_pt="none")
     assert sdes_open._resolve_sdes_video_pt(pin_off) is None
@@ -120,7 +120,7 @@ def test_each_read_site_follows_the_rule(monkeypatch):
     assert rtsp_publish.direct_publish_enabled(on) is True
     assert aac_track.publish_aac_enabled(on) is True
     assert hls_ts.enabled(on) is True
-    assert sdes_open._should_direct_publish(URL, None, None, True, stream_settings=on)
+    assert sdes_open._should_direct_publish(URL, None, None, stream_settings=on)
     assert sdes_open._resolve_sdes_video_pt(StreamSettings(sdes_video_pt=96)) == 96
     # A partial setting leaves the rest to the environment.
     assert hls_ts.enabled(StreamSettings(hls_direct_ts=True)) is False

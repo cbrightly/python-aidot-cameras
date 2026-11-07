@@ -1580,22 +1580,19 @@ def test_sdes_direct_publish_decision(monkeypatch):
 
     url = "rtsp://127.0.0.1:8554/aidot_x"
     monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, "0")
-    assert not _should_direct_publish(url, None, None, True)  # turned off
+    assert not _should_direct_publish(url, None, None)  # turned off
     monkeypatch.delenv(rp.ENV_DIRECT_PUBLISH, raising=False)
-    assert _should_direct_publish(url, None, None, True)  # the default
-    assert not _should_direct_publish("http://127.0.0.1:18600/x.ts", None, None, True)
-    assert not _should_direct_publish(None, None, None, True)  # decode drain
-    assert not _should_direct_publish(url, "/tmp/clip.ts", None, True)  # recording
-    assert not _should_direct_publish(url, None, 10, True)  # snapshot
-    # SRTP reaches the serve still encrypted (ffmpeg decrypts it from the
-    # SDP's a=crypto) for any model the bridge does not decrypt itself.
-    assert not _should_direct_publish(url, None, None, False)
+    assert _should_direct_publish(url, None, None)  # the default
+    assert not _should_direct_publish("http://127.0.0.1:18600/x.ts", None, None)
+    assert not _should_direct_publish(None, None, None)  # decode drain
+    assert not _should_direct_publish(url, "/tmp/clip.ts", None)  # recording
+    assert not _should_direct_publish(url, None, 10)  # snapshot
 
 
-def test_the_open_passes_the_plain_rtp_decision_through():
-    """The direct-publish decision the serve acts on is told whether the media
-    reaches it decrypted and which video codec was negotiated: a decision made
-    without them publishes SRTP ciphertext or an unvalidated codec."""
+def test_the_open_passes_the_negotiated_codec_through():
+    """The direct-publish decision the serve acts on is told which video codec
+    was negotiated: a decision made without it publishes an unvalidated
+    codec."""
     import ast
 
     from tests.ast_guards import calls_to, names_in, sdes_open_family
@@ -1605,13 +1602,13 @@ def test_the_open_passes_the_plain_rtp_decision_through():
         for fn in sdes_open_family()
         for n in ast.walk(fn)
         if isinstance(n, ast.Assign)
-        and any(getattr(t, "id", None) == "_direct_publish" for t in n.targets)
+        and any(getattr(t, "attr", None) == "_direct_publish" for t in n.targets)
         and calls_to(n.value, "_should_direct_publish")
     ]
     assert len(decisions) == 1, "the open's direct-publish decision moved"
     args = decisions[0].args
-    assert len(args) == 5
-    assert "_use_plain_rtp" in names_in(args[3]) and "_keep_v" in names_in(args[4])
+    assert len(args) == 4
+    assert "_serve_video_pt" in names_in(args[3])
 
 
 def test_the_sdes_serve_launch_goes_through_the_spawn_helper():
@@ -2289,10 +2286,10 @@ def test_direct_publish_is_gated_to_the_validated_codec(monkeypatch):
 
     url = "rtsp://127.0.0.1:8554/aidot_x"
     monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, "1")
-    assert _should_direct_publish(url, None, None, True, 96)  # H.264
-    assert not _should_direct_publish(url, None, None, True, 97)  # H.265
+    assert _should_direct_publish(url, None, None, 96)  # H.264
+    assert not _should_direct_publish(url, None, None, 97)  # H.265
     # Codec not known yet (no narrowing): the caller decides later.
-    assert _should_direct_publish(url, None, None, True, None)
+    assert _should_direct_publish(url, None, None, None)
 
 
 # --------------------------------------------------------------------------- #
