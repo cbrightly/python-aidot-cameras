@@ -21,7 +21,7 @@ from aidot_cameras.camera import client as cc
 from aidot_cameras.camera.client import _camera_closed_session, _session_end_wait
 from aidot_cameras.camera.protocol import ReconnectPacer
 
-from tests.test_dtls_serve_backoff import _canary_run, _close_pc_after, _paced
+from tests.test_dtls_serve_backoff import _close_pc_after
 
 # --------------------------------------------------------------------------- #
 # Detecting the camera's close                                                 #
@@ -158,7 +158,7 @@ def test_a_camera_close_after_20s_reopens_at_once_and_resets_the_pacer():
     assert p.attempt == 0
 
 
-def test_camera_closes_in_a_row_never_go_dormant():
+def test_camera_closes_the_caller_allows_keep_reopening_at_once():
     p = _pacer()
     assert [_pace(p, 20.0) for _ in range(10)] == [0.0] * 10
 
@@ -183,13 +183,55 @@ def test_a_20s_session_that_dropped_is_still_short():
 # --------------------------------------------------------------------------- #
 
 
-def _closing_camera(monkeypatch, make_camera_device_client, canary):
+def _camera_closed_pc():
+    """A fake PC whose one DTLS transport got the camera's close_notify."""
+    from tests.keepalive_driver import FakePc
+
+    ours, cam = _dtls_pair()
+    cam.shutdown()
+    _pump(cam, ours)
+    with pytest.raises(SSL.ZeroReturnError):
+        ours.recv(1500)
+    pc = FakePc()
+    real = _pc_over(ours)
+    pc.getTransceivers = real.getTransceivers
+    pc.sctp = None
+    return pc
+
+
+def _closing_camera(monkeypatch, make_camera_device_client, canary, n=1):
+    """``n`` sessions, each closed by the camera 0.3 s after it opened."""
+    import asyncio
+
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
+    from tests.test_dtls_serve_backoff import _real_video_has_started
+
     monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "30")
     monkeypatch.setattr(cc, "_CAMERA_CLOSE_MIN_S", 0.1)
-    monkeypatch.setattr(cc, "_camera_closed_session", lambda pc: True)
-    run, cam = _canary_run(monkeypatch, make_camera_device_client, canary)
+    proxy = types.SimpleNamespace(
+        **{k: getattr(asyncio, k) for k in dir(asyncio) if not k.startswith("_")}
+    )
+    monkeypatch.setattr(cc, "asyncio", proxy)
+    cam = make_camera_device_client("A000088")
+    cam._stream_idle_opt = 0.0
+    sessions = []
+    for _ in range(n):
+        sess = FakeDtlsSession()
+        sess._pc = _camera_closed_pc()
+        sessions.append(sess)
+    run = DtlsServeRun(monkeypatch, cam, sessions, timeout=1.0 + 1.2 * n)
+    monkeypatch.setattr(cc, "_live_video_canary", lambda pc, stored: canary)
+    monkeypatch.setattr(cc, "_video_has_started", _real_video_has_started)
     _close_pc_after(cam, 0.3)
     return run
+
+
+def _reopens_and_waits(caplog):
+    msgs = [r.getMessage() for r in caplog.records]
+    return (
+        [m for m in msgs if "closed its session" in m],
+        [m for m in msgs if "before reopening" in m],
+    )
 
 
 def test_the_serve_loop_reopens_after_a_camera_close_with_video(
@@ -200,11 +242,8 @@ def test_the_serve_loop_reopens_after_a_camera_close_with_video(
     )
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
-    msgs = [r.getMessage() for r in caplog.records]
-    assert not _paced(caplog), msgs
-    assert any(
-        "closed its session" in m and "camera closed the session" in m for m in msgs
-    ), msgs
+    reopened, paced = _reopens_and_waits(caplog)
+    assert len(reopened) == 1 and not paced, (reopened, paced)
     assert run.opens == 2
 
 
@@ -217,9 +256,23 @@ def test_the_serve_loop_still_paces_a_camera_close_without_video(
     )
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
-    msgs = [r.getMessage() for r in caplog.records]
-    assert _paced(caplog), msgs
-    assert any("camera closed the session" in m for m in msgs), msgs
+    reopened, paced = _reopens_and_waits(caplog)
+    assert not reopened and len(paced) == 1, (reopened, paced)
+
+
+def test_a_fourth_camera_close_in_a_row_is_paced(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """A camera that keeps closing (another viewer taking its one media slot)
+    is not fought for the slot: three reopen at once, the fourth waits."""
+    run = _closing_camera(
+        monkeypatch, make_camera_device_client, {"frames": 40, "keyframes": 2}, n=4
+    )
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    reopened, paced = _reopens_and_waits(caplog)
+    assert len(reopened) == cc._CAMERA_CLOSE_RUN_MAX == 3, reopened
+    assert len(paced) == 1, paced
 
 
 # --------------------------------------------------------------------------- #

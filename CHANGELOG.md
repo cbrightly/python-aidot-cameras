@@ -284,8 +284,8 @@ served (pull, stdout and RTSP push), once the reference installation runs it.
   still healthy. The serve loop counted that as a failed short session: 30-45 s
   with no picture per close, and dormant after five in a row. A session the
   camera closed after delivering video and living at least 10 s now reopens
-  on the open gate (about 8 s back to picture, measured), and the end reason
-  says "camera closed the session".
+  on the open gate (about 8 s back to picture, measured), up to three in a
+  row, and the end reason says "camera closed the session".
 - **A stdout DTLS serve (`aidot-go2rtc <id> -`) no longer stops at the first
   session end.** The cycle closed its stdout duplicate before the mux's final
   flush, and that failed write was read as the reader having gone, so the

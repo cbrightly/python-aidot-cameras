@@ -334,9 +334,13 @@ _SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S = 30.0, 45.0
 # a failure cost a viewer 30-45 s of no picture per close and sent the serve
 # dormant after AIDOT_DTLS_FUTILE_VIDEO_LIMIT of them in a row. Such a session
 # reopens on the open gate instead, as one that lasted does. It must have
-# delivered video and lived this long, so a camera that closes every session
-# at once still meets the backoff.
+# delivered video and lived _CAMERA_CLOSE_MIN_S, so a camera that closes every
+# session at once still meets the backoff, and only _CAMERA_CLOSE_RUN_MAX of
+# them in a row reopen at once: a camera that keeps closing (another viewer
+# taking its one media slot, say) is paced as before rather than fought for
+# the slot. At one close in three, four in a row is about one run in eighty.
 _CAMERA_CLOSE_MIN_S = 10.0
+_CAMERA_CLOSE_RUN_MAX = 3
 
 
 def _camera_closed_session(pc: Any) -> bool:
@@ -344,7 +348,9 @@ def _camera_closed_session(pc: Any) -> bool:
 
     Read from OpenSSL's shutdown state on the peer connection's DTLS
     transports: RECEIVED_SHUTDOWN is set only by the peer's close_notify,
-    while our own teardown sets SENT_SHUTDOWN. aiortc keeps the connection in
+    while our own teardown sets SENT_SHUTDOWN (and only on a transport still
+    connected), so it can be read after the session has been stopped. aiortc
+    keeps the connection in
     a private attribute, so any surprise reads as False - the session is then
     paced as before."""
     try:
@@ -354,10 +360,11 @@ def _camera_closed_session(pc: Any) -> bool:
         sctp = getattr(pc, "sctp", None)
         if sctp is not None:
             transports.append(sctp.transport)
-        return any(
-            getattr(t, "_ssl", None) is not None
-            and bool(t._ssl.get_shutdown() & SSL.RECEIVED_SHUTDOWN)
-            for t in transports
+        conns = [t._ssl for t in transports if getattr(t, "_ssl", None) is not None]
+        # Every DTLS transport: one unbundled transport closed while the
+        # session died of something else is not the camera ending it.
+        return bool(conns) and all(
+            c.get_shutdown() & SSL.RECEIVED_SHUTDOWN for c in conns
         )
     except Exception:
         return False
@@ -377,8 +384,10 @@ def _session_end_wait(
 
     A session that lasted ``threshold_s`` and is not known to have had no
     video resets the pacer and the loop reopens on its open gate (0), and so
-    does one the camera closed itself (``camera_closed``: a close_notify after
-    video was seen) once it lived _CAMERA_CLOSE_MIN_S. Any other session is a
+    does one the camera closed itself once it lived _CAMERA_CLOSE_MIN_S:
+    ``camera_closed`` is the caller's word that the camera sent a close_notify
+    after video was SEEN and that the run of such closes is within
+    _CAMERA_CLOSE_RUN_MAX. Any other session is a
     failure: 30 s the first time, then up to 45 s, and None once ``limit``
     (0: no limit) failures have come in a row."""
     if not no_video and (
@@ -1478,9 +1487,8 @@ class _DtlsServeLoopState:
     _session_ended_at: "Any" = dataclasses.field(init=False)
     # Why the last serve cycle stopped, for the session-end log line.
     _session_end_reason: "Any" = dataclasses.field(init=False)
-    # prepare_session, serve_cycle; read by session_end: the camera closed
-    # the session itself (_camera_closed_session)
-    _session_camera_closed: "Any" = dataclasses.field(init=False)
+    # the loop, session_end: camera-closed sessions in a row (_CAMERA_CLOSE_RUN_MAX)
+    _camera_close_run: "Any" = dataclasses.field(init=False)
     _session_pacer: "Any" = dataclasses.field(init=False)  # the loop
     loop: "Any" = dataclasses.field(init=False)  # the loop
     vq: "Any" = dataclasses.field(init=False)  # open_attempt
@@ -1620,7 +1628,6 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     ps._session_opened_at = ps.loop.time()
     ps._session_ended_at = ps._session_opened_at  # serve_cycle moves it on
     ps._session_end_reason = "stopped before serving"
-    ps._session_camera_closed = False
     self._stream_session = ps.session
     ps.pc = ps.session._pc
     # PC-dead test for the serve loop.  closed/failed are terminal at
@@ -1856,13 +1863,9 @@ async def _dtls_serve_loop_serve_cycle(
             while self._streaming_active:
                 await asyncio.sleep(0.5)
                 if ps._pc_dead():
-                    if _camera_closed_session(ps.pc):
-                        ps._session_camera_closed = True
-                        _why = "camera closed the session"
-                    else:
-                        _why = "connection " + str(
-                            getattr(ps.pc, "connectionState", "closed")
-                        )
+                    _why = "connection " + str(
+                        getattr(ps.pc, "connectionState", "closed")
+                    )
                     break
                 if not ps.mux_thread.is_alive():
                     _why = "publish ended"
@@ -2118,13 +2121,24 @@ async def _dtls_serve_loop_session_end(
         _end = min(_end, ps._pc_bad_box[0])
     _lived = _end - ps._session_opened_at
     _no_video = ps._session_video_known and not ps._session_video_seen
+    _threshold = settings.read("AIDOT_DTLS_SHORT_SESSION_S")
+    # Read here, once, after the session has been stopped, so every way a
+    # serve cycle can end is covered (see _camera_closed_session).
+    _camera_close = (
+        _lived < _threshold and ps._session_video_seen and _camera_closed_session(ps.pc)
+    )
+    ps._camera_close_run = ps._camera_close_run + 1 if _camera_close else 0
+    if _camera_close:
+        ps._session_end_reason = "camera closed the session; " + str(
+            ps._session_end_reason
+        )
     _wait = _session_end_wait(
         ps._session_pacer,
         _lived,
         no_video=_no_video,
-        threshold_s=settings.read("AIDOT_DTLS_SHORT_SESSION_S"),
+        threshold_s=_threshold,
         limit=_futile_video_limit(),
-        camera_closed=ps._session_camera_closed and ps._session_video_seen,
+        camera_closed=_camera_close and ps._camera_close_run <= _CAMERA_CLOSE_RUN_MAX,
     )
     if not self._streaming_active:
         return None
@@ -2151,15 +2165,14 @@ async def _dtls_serve_loop_session_end(
         await self._go_dormant(release_url=False, why="session abandon")
         return _PhaseReturn(None)
     if not _wait:
-        if ps._session_camera_closed and _lived < settings.read(
-            "AIDOT_DTLS_SHORT_SESSION_S"
-        ):
+        if _camera_close:
             _LOGGER.info(
                 "DTLS serve: camera %s closed its session after %.0fs (%s)"
-                " - reopening",
+                " - reopening (%d in a row)",
                 self.device_id,
                 _lived,
                 ps._session_end_reason,
+                ps._camera_close_run,
             )
         return None
     _LOGGER.log(
@@ -7159,6 +7172,7 @@ class CameraMixin(
             _DTLS_RETRY_BASE_S, _DTLS_RETRY_CAP_S, floor_frac=0.9
         )
         ps._session_pacer = self._dtls_session_pacer
+        ps._camera_close_run = 0
         ps._last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
         ps._not_ready_burst = 0  # not-ready answers in a row (encoder cold)
         ps.loop = asyncio.get_running_loop()

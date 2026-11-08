@@ -234,7 +234,7 @@ failed session). A session the camera closes itself (a DTLS close_notify)
 after delivering video and living at least 10 s is not a failure: viewed from
 outside its network an A000088 closes about one session in three 19.5-20.4 s
 after the handshake, and the serve reopens it at once (logged as "camera ...
-closed its session"). Failed opens are paced on one backoff from 15 s up to 600 s,
+closed its session"), up to three in a row. Failed opens are paced on one backoff from 15 s up to 600 s,
 540-600 s at the cap; a camera the cloud reports offline waits the 600 s at
 once, ending early once it is back. A not-ready answer (encoder still cold)
 first gets four quick 3 s retries. After an open whose ICE never
