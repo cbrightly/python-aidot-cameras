@@ -6,6 +6,24 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc72]
+
+Soak: resets the clock. One change, to the DTLS serve loop's pacing after a
+session the camera ends itself.
+
+### Fixed
+- **A DTLS session the camera closes itself is reopened at once.** Viewed
+  from outside its network, an A000088 ends about one session in three
+  19.5-20.4 s after the handshake with a DTLS close_notify, while the path is
+  still healthy (consent checks answered to the end, the same signalling and
+  data-channel traffic as a session that runs on). The serve loop counted
+  that as a short session: 30-45 s with no picture per close. A session the
+  camera closed (RECEIVED_SHUTDOWN on its DTLS transport) after delivering
+  video and living at least 10 s now reopens on the open gate, about 8 s back
+  to picture as measured, and logs "camera ... closed its session". A camera
+  that closes without video, within 10 s, or a fourth time in a row keeps
+  the backoff.
+
 ## [1.0.0rc71]
 
 Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing on
