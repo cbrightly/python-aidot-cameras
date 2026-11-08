@@ -219,7 +219,11 @@ A000088 DTLS connections, so it is a strict no-op everywhere else).
 Since 1.0.0rc71 a served DTLS session that ends on its own within
 `AIDOT_DTLS_SHORT_SESSION_S` (30 s) of opening, or never delivers video, is a
 short session and is paced on its own backoff (30 s, then 30-45 s), not
-reopened on the bare 15 s gate; and after an open whose ICE never connected
+reopened on the bare 15 s gate. Since 1.0.0rc72 a session the camera closes
+itself (a DTLS close_notify) after delivering video and living at least 10 s
+is not short: viewed from outside its network an A000088 closes about one
+session in three 19.5-20.4 s after the handshake, and the serve reopens it at
+once (logged as "camera ... closed its session"), up to three in a row. And after an open whose ICE never connected
 (`AidotIceNotEstablished`) the next serve-loop open waits at least
 `AIDOT_BUSY_RETRY_S` (45 s), since the camera still holds the session it
 accepted and refuses a sooner retry as busy. Hammering an A000088 like that is
