@@ -278,6 +278,18 @@ served (pull, stdout and RTSP push), once the reference installation runs it.
   mux always signals. `AIDOT_SERVE_RELAY` now applies to SDES serves only.
 
 ### Fixed
+- **A DTLS session the camera closes itself is reopened at once.** Viewed
+  from outside its network, an A000088 ends about one session in three
+  19.5-20.4 s after the handshake with a DTLS close_notify, while the path is
+  still healthy. The serve loop counted that as a failed short session: 30-45 s
+  with no picture per close, and dormant after five in a row. A session the
+  camera closed after delivering video and living at least 10 s now reopens
+  on the open gate (about 8 s back to picture, measured), and the end reason
+  says "camera closed the session".
+- **A stdout DTLS serve (`aidot-go2rtc <id> -`) no longer stops at the first
+  session end.** The cycle closed its stdout duplicate before the mux's final
+  flush, and that failed write was read as the reader having gone, so the
+  serve released itself whenever a session ended.
 - **A001064 cold open back to about +2.9 s to first media (was +5.4 s).**
   Removing the webrtcReq echo wait changed when the camera's first STUN
   probes reach the bridge, which made the PTZ about 2.5 s slower. The camera

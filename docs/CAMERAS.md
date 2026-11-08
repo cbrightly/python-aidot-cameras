@@ -230,7 +230,11 @@ failed session and is paced on its own backoff (30 s, then 30-45 s), not
 reopened on the bare 15 s gate; after `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` (5) in a
 row the serve goes dormant until a fresh live view reopens it (the count is
 kept on the camera, so one still failing goes dormant again after one more
-failed session). Failed opens are paced on one backoff from 15 s up to 600 s,
+failed session). A session the camera closes itself (a DTLS close_notify)
+after delivering video and living at least 10 s is not a failure: viewed from
+outside its network an A000088 closes about one session in three 19.5-20.4 s
+after the handshake, and the serve reopens it at once (logged as "camera ...
+closed its session"). Failed opens are paced on one backoff from 15 s up to 600 s,
 540-600 s at the cap; a camera the cloud reports offline waits the 600 s at
 once, ending early once it is back. A not-ready answer (encoder still cold)
 first gets four quick 3 s retries. After an open whose ICE never
