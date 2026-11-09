@@ -200,14 +200,15 @@ _PTZ_DIR_CODES: dict = {
 
 # Live-stream resolution (AVIOCTRL_QUALITY_*).  The official app's picker has
 # THREE arms, not two: MAX(1), MIDDLE(5), and 0x10 = 16, whose label is
-# _auto_resulution (HorLiveController.smali:629-631).  16 is deliberately absent
-# here: it is outside AVIOCTRL_QUALITY, and measured 2026-08-07 it behaves like
-# every other value - acked, and the encode unchanged in that session and the
-# next.  Adding it would offer a control that does nothing.  The two arms below
-# are the ones with enum names, kept for parity with the command the app sends.
+# _auto_resulution (HorLiveController.smali:629-631).  All three are offered:
+# measured 2026-11-09 on an A000088, the camera records the value it was sent
+# as its StreamType property (hd -> "0", sd -> "1", auto -> "2"), keeps it
+# across sessions, and the app reads that property back for its label - so a
+# setting made here is what the app shows, and one made in the app is what the
+# property reports.  Whether the encode follows is the camera's affair.
 # Sent as IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ (800) over the active session,
 # payload <IB3x> = channel(0) + quality byte (SMsgAVIoctrlSetStreamCtrlReq).
-_STREAM_QUALITY: dict = {"hd": 1, "sd": 5}  # AVIOCTRL_QUALITY_MAX / _MIDDLE
+_STREAM_QUALITY: dict = {"hd": 1, "sd": 5, "auto": 16}  # MAX / MIDDLE / the app's Auto
 
 
 # livePlayResp code for "not ready": the camera accepted the request but cannot

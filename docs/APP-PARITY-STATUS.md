@@ -180,6 +180,30 @@ against 0.01-0.19 s for the enum values. That is 3-50x slower and might mean the
 firmware does real work for it. It is n=1 against noisy latencies, and the video
 was unchanged either way, so nothing is built on it.
 
+### What the setting does persist to, 2026-11-09
+
+Two things the record above had wrong, found while checking the control
+against the app once more.
+
+The library's `async_set_resolution` (and `async_ptz_move`) looked for the
+session on the attribute only the serve loop sets, so a caller of the public
+`async_open_webrtc_stream` had every control answer "not streaming" with
+frames flowing; `live_validate` had been setting the private attribute itself
+to get its measurements. The open now records its session and the controls
+ride it. The measurements above were made through the harness, so they stand.
+
+With the command actually sent, the camera's `StreamType` property follows it
+and keeps it: on an A000088, `hd` set it to `"0"`, `sd` to `"1"`, `auto` (16)
+to `"2"`, and the value was still there after the session ended and across
+the next ones. The app does not write that property; it reads it back for the
+label on its picker (`onReceiveMqttStreamTypeChanged`), which is why the app
+shows whatever the last client set. "StreamType is acked and ignored" was true
+only of writing the property directly. Fresh sessions opened under each of the
+three recorded values encoded the same: 190-192 frames and about 335 kbps over
+their first 12 s, from outside the camera's network. The encode is unchanged;
+the setting is real and shared with the app, so the library offers all three
+values and the integration can show the one the camera reports.
+
 ### Why the app's switch still works
 
 The owner reports the app's Auto/HD/SD switch has a visible effect. It sends the

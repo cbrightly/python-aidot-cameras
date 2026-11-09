@@ -6,6 +6,20 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+- **`async_set_resolution("auto")`**, the third arm of the app's picker
+  (quality 16). The camera records whichever of hd, sd or auto it was last
+  sent as its `StreamType` property ("0", "1", "2"), keeps it across sessions,
+  and the app reads it back for its label; so the setting is shared with the
+  app even though the encode does not change for it on the cameras measured.
+
+### Fixed
+- **Controls ride the session `async_open_webrtc_stream` returned.** The
+  resolution, PTZ and speaker controls looked for the session on an attribute
+  only the serve loop sets, so a caller of the public open had each answer
+  "not streaming" with frames flowing. The open records its session and the
+  controls use it while it is up.
+
 ## [1.1.0]
 
 The consolidation of the camera code against the official app's protocol,

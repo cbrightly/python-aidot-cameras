@@ -5955,7 +5955,7 @@ class CameraMixin(
         session could carry talk. Works for both DTLS and SDES cameras (same
         WebRTC audio path).
         """
-        session = self._stream_session
+        session = self._control_session()
         own_session = False
         if session is None or not getattr(session, "talk_supported", False):
             session = None
@@ -7476,7 +7476,7 @@ class CameraMixin(
         abort_holder: list = []
         async with _get_webrtc_open_gate():
             try:
-                return await self._async_open_webrtc_stream_impl(
+                session = await self._async_open_webrtc_stream_impl(
                     on_frame,
                     stream_id=stream_id,
                     timeout=timeout,
@@ -7491,6 +7491,8 @@ class CameraMixin(
                     _abort_holder=abort_holder,
                     **kwargs,
                 )
+                self._note_direct_session(session)
+                return session
             except BaseException:
                 if abort_holder:
                     try:

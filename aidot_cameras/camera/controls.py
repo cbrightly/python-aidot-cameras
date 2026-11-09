@@ -68,7 +68,8 @@ class _CameraControlsMixin:
         ok = await self.async_set_device_attribute("LightOnOff", 1 if on else 0)
         if ok and on and brightness != 100:
             await self.async_set_device_attribute(
-                "Dimming", max(LIGHT_BRIGHTNESS_MIN, min(LIGHT_BRIGHTNESS_MAX, brightness))
+                "Dimming",
+                max(LIGHT_BRIGHTNESS_MIN, min(LIGHT_BRIGHTNESS_MAX, brightness)),
             )
         return ok
 
@@ -486,7 +487,7 @@ class _CameraControlsMixin:
         # always run the no-command control - without it, "the picture changed"
         # and "twenty seconds passed" are the same measurement.
         payload = bytes([code, min(255, max(0, speed)), preset, 0, 0, 0, 0, 0])
-        session = self._stream_session
+        session = self._control_session()
         if session is None:
             _LOGGER.warning("async_ptz_move: no active stream session")
             return False
@@ -504,6 +505,31 @@ class _CameraControlsMixin:
     async def async_ptz_stop(self) -> bool:
         """Send PTZ stop command (direction_code=0, speed=0)."""
         return await self.async_ptz_move("stop", speed=0)
+
+    def _control_session(self):
+        """The session a control rides: the serve loop's, else the one the last
+        ``async_open_webrtc_stream`` returned while it is still up.
+
+        The serve loop (Home Assistant's path) records its session on
+        ``_stream_session``; a caller of the public open used to find every
+        control answering "not streaming" with frames flowing, because that
+        session was never recorded anywhere (live_validate worked around it by
+        setting the private attribute itself). A session whose teardown has
+        begun (``_stop_task`` set) no longer counts.
+        """
+        session = self._stream_session
+        if session is not None:
+            return session
+        session = getattr(self, "_direct_session", None)
+        if session is None or getattr(session, "_stop_task", None) is not None:
+            return None
+        return session
+
+    def _note_direct_session(self, session) -> None:
+        """Record the session the public open returned, and give it the
+        remembered resolution, as the serve loop gives its own."""
+        self._direct_session = session
+        self._apply_pending_resolution()
 
     async def async_set_resolution(self, quality: str) -> bool:
         """Switch the live-stream resolution.
@@ -543,9 +569,13 @@ class _CameraControlsMixin:
         Payload <IB3x> = channel(0) + quality byte + 3 reserved.
         The app has three settings, not two: Auto, SD and HD, which
         `NewLivePresenter.setDefaultResolution` maps from the persistent
-        `props.StreamType` property to quality 16, 5 and 1. This library
-        implements only hd=1 and sd=5; 16 (Auto) was swept and did nothing, and
-        `StreamType` itself is acked-and-ignored on every write.
+        `props.StreamType` property to quality 16, 5 and 1; this library offers
+        all three as "hd", "sd" and "auto". `StreamType` is the camera's own
+        record of the last value it was sent (measured 2026-11-09 on an
+        A000088: hd -> "0", sd -> "1", auto -> "2", kept across sessions), which
+        the app reads back for its label; writing the property directly is
+        what is acked and ignored. Fresh sessions under each of the three
+        encoded the same (about 335 kbps, 16 fps, from outside the network).
         """
         q = _STREAM_QUALITY.get(quality.lower())
         if q is None:
@@ -553,7 +583,7 @@ class _CameraControlsMixin:
             return False
         self._desired_quality = quality.lower()
         payload = struct.pack("<IB3x", 0, q)
-        session = self._stream_session
+        session = self._control_session()
         if session is None:
             _LOGGER.info(
                 "resolution %s remembered; the camera is not streaming, so it "
@@ -614,7 +644,7 @@ class _CameraControlsMixin:
         if not quality:
             return
         q = _STREAM_QUALITY.get(quality)
-        session = self._stream_session
+        session = self._control_session()
         if q is None or session is None:
             return
         try:
