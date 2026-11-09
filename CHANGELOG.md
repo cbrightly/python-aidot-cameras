@@ -7,6 +7,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ## [Unreleased]
 
 ### Added
+- **The camera's power switch: `status.powered` and `async_set_power(on)`.**
+  The `TurnOnOff` property, the one the official app writes most (its live
+  screen's switch), read into `CameraStatusData.powered` and written by
+  `async_set_power`. Off, a camera stays on MQTT and keeps taking property
+  writes but will not stream (no webrtcResp; measured on an A000088), so the
+  serve and keepalive loops now treat "switched off" as they treat
+  cloud-offline: open failures at DEBUG and a pause until it is switched
+  back on, instead of retries.
+- **`async_watch_unbind(callback)` and `async_stop_watching_unbind()`.** The
+  cloud announces a device removed from the account (`devUnbindNotif`) on
+  the account's topics, and the app acts on it at once; the listener rides
+  the persistent MQTT connection and calls back for this device's notice, so
+  a consumer need not wait for its next device-list poll.
 - **`async_set_resolution("auto")`**, the third arm of the app's picker
   (quality 16). The camera records whichever of hd, sd or auto it was last
   sent as its `StreamType` property ("0", "1", "2"), keeps it across sessions,

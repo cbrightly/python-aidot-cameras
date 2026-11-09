@@ -36,7 +36,7 @@ Messages the app's IPC service sends or handles, by method name.
 | `eventNotify` | cloud -> app | event list changed (`IpcServiceImpl$5`, `$7`) | no: same as above |
 | `thumbnailPhotoNotify` | camera -> app | a thumbnail is ready (`IpcServiceImpl$9`) | no: snapshots come from the live stream; the app's thumbnails go with the SD card browser (AVIO `0x4b9`, section 2) |
 | `updateOtaStatusNotify` / `updateOtaStautsNotif` | camera -> app | firmware update progress | no (see 5) |
-| `devUnbindNotif` | cloud -> app | device removed from the account | no: the integration notices on the next device-list refresh. Cheap to add as an immediate removal |
+| `devUnbindNotif` | cloud -> app | device removed from the account | yes since library 1.1.1 (`async_watch_unbind`) and integration 2.40.0 (re-syncs the device list on the notice) |
 | `devDiscoveryReq` | app -> LAN | LAN discovery broadcast (lights and cameras) | yes |
 | `loginReq` / `loginResp` | app -> device (LAN) | LAN login (lights) | yes (upstream python-aidot) |
 | `getVerListReq`, `getDevInfoReq` | app -> cloud/camera | firmware version list; device info for an abnormal version | no (see 5) |
@@ -72,7 +72,7 @@ The app's property bean lists these. "App writes" is from the app's
 
 | Property | App reads | App writes | Status |
 |---|---|---|---|
-| `TurnOnOff` | yes | yes (the most-written property; `NewLivePresenter.DeviceTurnOn`, the live screen's power switch) | **no**: the camera's on/off switch. The integration has no camera on/off entity. Worth adding |
+| `TurnOnOff` | yes | yes (the most-written property; `NewLivePresenter.DeviceTurnOn`, the live screen's power switch) | yes since library 1.1.1 (`status.powered`, `async_set_power`) and integration 2.40.0 (the camera entity's own on/off) |
 | `Dimming`, `LightOnOff` | yes | yes | yes (floodlight) |
 | `MotionDetection_Enable` | yes | yes | yes |
 | `PirDetection_Enable`, `PirDetection_Sen` | yes | yes (`setPIRConfig`) | yes (motion detection and sensitivity on battery models) |
@@ -115,8 +115,6 @@ stream.
   Assistant is possible (an `update` entity) but a failed update bricks a
   camera the user cannot reach; left to the app on purpose. The firmware
   version is shown.
-- **Camera on/off (`TurnOnOff`):** the one frequently-written property with no
-  entity. Recommended next addition.
 - **Event push (`devEventNotif` / `eventNotify`):** the integration polls the
   cloud event list; the app gets a push. Faster motion events if implemented.
 - **Card recording thumbnails and deletion** (`0x4b9`, `0x4b7`): browser

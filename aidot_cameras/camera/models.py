@@ -114,6 +114,11 @@ class CameraStatusData(DeviceStatusData):
     #: HDR (HDRStatus).
     hdr: Optional[bool] = None
     microphone: Optional[bool] = None
+    #: The camera's own power switch (``TurnOnOff``, the app's live-screen
+    #: switch). Off, the camera answers MQTT (properties can still be written)
+    #: but refuses to stream: a webrtcReq gets no answer (measured 2026-11-09
+    #: on an A000088). None until the cloud has reported it.
+    powered: Optional[bool] = None
     night_vision_mode: Optional[str] = None  # "auto" | "on" | "off"
     ir_light: Optional[bool] = None  # nightVisionIRLight 0/1
     floodlight: Optional[bool] = None
@@ -181,6 +186,8 @@ class CameraStatusData(DeviceStatusData):
             self.hdr = b
         if (b := _as_bool(attr.get("micEnable"))) is not None:
             self.microphone = b
+        if (b := _as_bool(attr.get("TurnOnOff"))) is not None:
+            self.powered = b
         if (v := attr.get("nightVisionMode")) is not None:
             nv = _as_int(v)
             if nv is not None:
@@ -367,6 +374,22 @@ class VideoFrame:
     @property
     def is_audio(self) -> bool:
         return self.frame_type == _FRAME_TYPE_AUDIO
+
+
+def _camera_powered_off(dev: Any) -> bool:
+    """True when the camera's own power switch (``TurnOnOff``) is off.
+
+    Off, the camera is reachable over MQTT but will not answer a stream
+    request, so the serve loops treat it as they treat a cloud-offline camera:
+    expected open failures at DEBUG, and a pause instead of retries until it
+    is switched back on. None (not yet reported) is not off."""
+    return getattr(getattr(dev, "status", None), "powered", None) is False
+
+
+def _cloud_says_unavailable(dev: Any) -> bool:
+    """Offline by the cloud's explicit report, or switched off by its owner:
+    the two states in which opening a stream is known to be futile."""
+    return _cloud_reports_offline(dev) or _camera_powered_off(dev)
 
 
 def _cloud_reports_offline(dev: Any) -> bool:

@@ -170,6 +170,23 @@ class _CameraControlsMixin:
         """Enable or disable HDR (HDRStatus)."""
         return await self.async_set_device_attribute("HDRStatus", 1 if enabled else 0)
 
+    async def async_set_power(self, on: bool) -> bool:
+        """Switch the camera itself on or off (``TurnOnOff``, the app's
+        live-screen power switch).
+
+        Off, the camera stays on MQTT and keeps answering property writes, but
+        will not stream: a webrtcReq gets no answer until it is switched back
+        on (measured 2026-11-09 on an A000088: off at once, no webrtcResp in
+        30 s; on, a stream opened in 15 s). The serve loops read
+        ``status.powered`` and pause rather than retry while it is off, so the
+        state is recorded here as soon as the write is acknowledged, ahead of
+        the camera's own report.
+        """
+        ok = await self.async_set_device_attribute("TurnOnOff", 1 if on else 0)
+        if ok:
+            self.status.powered = on
+        return ok
+
     async def async_set_microphone(self, enabled: bool) -> bool:
         """Enable or disable the camera's microphone."""
         # micEnable: 1=on (default), 0=off

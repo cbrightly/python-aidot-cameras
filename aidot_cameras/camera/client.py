@@ -49,7 +49,9 @@ from .models import (  # re-exported: data models split into models.py
     CameraDeviceInformation,
     CameraStatusData,
     _as_int,
+    _camera_powered_off,
     _cloud_reports_offline,
+    _cloud_says_unavailable,
 )
 from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
 from . import h264_sps as _h264_sps
@@ -1552,7 +1554,7 @@ async def _dtls_serve_loop_open_attempt(
         # AIDOT_BUSY_RETRY_S, so the serve comes back within that of the slot
         # freeing. An encoder still cold (a DC-only answer) gets a short burst
         # of quick retries first (_not_ready_burst_delay).
-        _offline = _cloud_reports_offline(self)
+        _offline = _cloud_says_unavailable(self)
         _busy_s = settings.read("AIDOT_BUSY_RETRY_S")
         _floor = 0.0
         _burst = None
@@ -3095,7 +3097,7 @@ class CameraMixin(
         already throttled to ~probe cadence by _backoff_or_offline_pause, so its
         expected open failures should not drip WARNINGs into the log every probe.
         """
-        return _LOGGER.debug if _cloud_reports_offline(self) else _LOGGER.warning
+        return _LOGGER.debug if _cloud_says_unavailable(self) else _LOGGER.warning
 
     async def _backoff_or_offline_pause(self, delay: float) -> None:
         """Sleep a reconnect backoff, extended while the device is cloud-offline.
@@ -3117,24 +3119,25 @@ class CameraMixin(
         (observed live: two unpowered A000088s cycling 30 s open attempts
         pushed a healthy camera's cold open past two minutes).
         """
-        if not _cloud_reports_offline(self):
+        if not _cloud_says_unavailable(self):
             await asyncio.sleep(delay)
             return
         _LOGGER.info(
-            "keepalive[%s]: device is cloud-offline - pausing open retries "
+            "keepalive[%s]: device is %s - pausing open retries "
             "(recheck %.0fs, probe %.0fs)",
             self.device_id,
+            "switched off" if _camera_powered_off(self) else "cloud-offline",
             _OFFLINE_RECHECK_S,
             _OFFLINE_PROBE_S,
         )
         await self._chunked_wait(
             _OFFLINE_PROBE_S,
-            until=lambda: bool(self.status.online),
+            until=lambda: not _cloud_says_unavailable(self),
             chunk_s=_OFFLINE_RECHECK_S,
         )
         if not getattr(self, "_streaming_active", False):
             return
-        if self.status.online:
+        if not _cloud_says_unavailable(self):
             _LOGGER.info(
                 "keepalive[%s]: device back online - resuming opens",
                 self.device_id,
@@ -5504,6 +5507,59 @@ class CameraMixin(
         self._motion_active = True
         self._motion_seen = {}
         self._motion_task = asyncio.ensure_future(self._motion_poll_loop(lookback_s))
+
+    async def async_watch_unbind(self, callback: "Callable[[], None]") -> bool:
+        """Call ``callback()`` when the cloud announces this device removed
+        from the account (a ``devUnbindNotif`` on the account's topics).
+
+        The app reacts to that notice at once (its device-delete strategy);
+        a consumer polling the device list only notices at its next refresh.
+        Rides the account's persistent MQTT connection, subscribed to the
+        account wildcard, so it costs no extra connection. Returns False when
+        there is no MQTT session to listen on (the caller keeps polling).
+        A notice without a device id is passed on too: a refresh is cheap and
+        the shape of that message is not pinned down.
+        """
+        pm = await self._get_persistent_mqtt()
+        if pm is None:
+            return False
+        device_id = self.device_id
+
+        def _handler(topic, payload) -> None:
+            if "devUnbindNotif" not in str(payload)[:400]:
+                return
+            try:
+                msg = json.loads(payload)
+            except Exception:
+                return
+            if (msg.get("method") or "") != "devUnbindNotif":
+                return
+            inner = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
+            dev = inner.get("devId") or inner.get("deviceId") or msg.get("devId")
+            if dev and dev != device_id:
+                return
+            _LOGGER.info(
+                "camera %s: the cloud reports it removed from the account", device_id
+            )
+            try:
+                callback()
+            except Exception:
+                _LOGGER.debug("unbind callback failed", exc_info=True)
+
+        await self.async_stop_watching_unbind()
+        await pm.subscribe([f"iot/v1/c/{self.user_id}/#"])
+        self._unbind_handler = pm.add_handler(_handler)
+        return True
+
+    async def async_stop_watching_unbind(self) -> None:
+        """Stop the ``async_watch_unbind`` listener, if any."""
+        handler = getattr(self, "_unbind_handler", None)
+        if handler is None:
+            return
+        self._unbind_handler = None
+        pm = await self._get_persistent_mqtt()
+        if pm is not None:
+            pm.remove_handler(handler)
 
     async def async_stop_motion_polling(self) -> None:
         """Stop the motion-event polling started by ``async_start_motion_polling``."""
