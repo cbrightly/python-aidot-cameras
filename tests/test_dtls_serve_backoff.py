@@ -527,6 +527,23 @@ def test_the_failure_count_survives_a_dormant_serve(monkeypatch, cam):
     assert len(run.opens) == 1
 
 
+def test_a_good_session_a_viewer_leaves_starts_the_count_again(monkeypatch, cam):
+    """Four short sessions, then one that lasted with video until its viewer
+    left (an idle release, which is never paced): the next restart's short
+    sessions count from zero, not from four, so they do not go dormant on the
+    first of them."""
+    _Run(monkeypatch, cam, [_Sess(5.0)] * 4 + [_Sess(120.0, idle=True)]).run()
+    run = _Run(monkeypatch, cam, [_Sess(5.0)] * 4).run()
+    assert not run.dormant
+    assert len(run.opens) == 5  # the script ran out on the fifth
+
+
+def test_a_short_session_a_viewer_leaves_does_not_reset_the_count(monkeypatch, cam):
+    _Run(monkeypatch, cam, [_Sess(5.0)] * 4 + [_Sess(5.0, idle=True)]).run()
+    run = _Run(monkeypatch, cam, [_Sess(5.0)] * 2).run()
+    assert run.dormant == ["session abandon"]
+
+
 def test_a_good_session_after_a_restart_starts_the_count_again(monkeypatch, cam):
     _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(6)]).run()
     run = _Run(monkeypatch, cam, [_Sess(120.0)] + [_Sess(5.0)] * 3).run()

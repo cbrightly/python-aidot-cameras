@@ -288,6 +288,17 @@ served (pull, stdout and RTSP push), once the reference installation runs it.
   mux always signals. `AIDOT_SERVE_RELAY` now applies to SDES serves only.
 
 ### Fixed
+- **A good session the viewer leaves starts the DTLS failure count again.**
+  The count of short sessions in a row that sends a serve dormant
+  (`AIDOT_DTLS_FUTILE_VIDEO_LIMIT`) was reset only by a session that ended on
+  its own after lasting with video; one released because its viewer left was
+  never paced, rightly, but left the count standing, so four short sessions
+  could stay counted against a camera across a day of good ones. Review
+  finding on this release.
+- **A mqttConfig2 lookup that fails is handled like any other failure of the
+  broker lookup**: logged, and the open raises its usual "MQTT unavailable"
+  rather than the bare exception. Opt-in path (`AIDOT_MQTT_CONFIG2`); review
+  finding on this release.
 - **A stdout DTLS serve (`aidot-go2rtc <id> -`) no longer stops at the first
   session end.** The cycle closed its stdout duplicate before the mux's final
   flush, and that failed write was read as the reader having gone, so the

@@ -642,3 +642,19 @@ def test_the_private_write_leaves_the_old_file_on_failure(tmp_path):
         write_private_file(str(path), boom, prefix=".t-", encoding="ascii")
     assert path.read_text() == "one"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["f"]
+
+
+def test_a_config2_failure_is_this_functions_failure(on, monkeypatch, caplog):
+    """A mqttConfig2 lookup that raises is logged and answered with None, like
+    every other failure of _async_get_mqtt_url; the open path then raises
+    AidotMqttUnavailable in its own words instead of a bare exception."""
+    _patch_session(monkeypatch, _SRV)
+    cam = _camera({"id": "u1", "accessToken": "AT"})
+
+    async def _boom():
+        raise AttributeError("'str' object has no attribute 'get'")
+
+    cam._async_mqtt_config2_url = _boom
+    with caplog.at_level("ERROR"):
+        assert asyncio.run(cam._async_get_mqtt_url()) is None
+    assert any("_async_get_mqtt_url failed" in r.getMessage() for r in caplog.records)

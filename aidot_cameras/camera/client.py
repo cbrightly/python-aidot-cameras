@@ -2116,6 +2116,7 @@ async def _dtls_serve_loop_session_end(
     # The session's end, one rule: the earlier of when its last serve cycle
     # stopped serving and when its PC went bad (not when the disconnect
     # debounce gave up on it). Not now: the teardown since is not its life.
+    # (The idle-release branch of the loop works it out the same way.)
     _end = ps._session_ended_at
     if ps._pc_bad_box[0] is not None:
         _end = min(_end, ps._pc_bad_box[0])
@@ -3480,9 +3481,11 @@ class CameraMixin(
         _cfg2_url, body = await asyncio.gather(
             self._async_mqtt_config2_url(), _server_url_config(), return_exceptions=True
         )
-        if isinstance(_cfg2_url, BaseException):
-            raise _cfg2_url
         try:
+            # Either failure is this function's failure: logged, and None to
+            # the caller, which raises AidotMqttUnavailable in its own words.
+            if isinstance(_cfg2_url, BaseException):
+                raise _cfg2_url
             if isinstance(body, BaseException):
                 raise body
 
@@ -3546,7 +3549,10 @@ class CameraMixin(
 
         except Exception as exc:
             _LOGGER.error("_async_get_mqtt_url failed: %r", exc)
-            if _cfg2_url:
+            # The mqttConfig2 broker stands on its own when only
+            # getServerUrlConfig failed; when that lookup is what failed,
+            # _cfg2_url is its exception, not a URL.
+            if isinstance(_cfg2_url, str) and _cfg2_url:
                 return self._accept_mqtt_url(_cfg2_url, "mqttConfig2")
             return None
 
@@ -7195,6 +7201,20 @@ class CameraMixin(
             if ps.cancelled:
                 return None
             if ps.idle_release:
+                # A session the viewer left after it had lasted with video is
+                # a good one, and starts the failure count again as a session
+                # that ended on its own would (_session_end_wait). An idle
+                # release is never paced, but four short sessions must not
+                # stay counted against the next across a day of good ones.
+                _end = ps._session_ended_at
+                if ps._pc_bad_box[0] is not None:
+                    _end = min(_end, ps._pc_bad_box[0])
+                if (
+                    ps._session_video_seen or not ps._session_video_known
+                ) and _end - ps._session_opened_at >= settings.read(
+                    "AIDOT_DTLS_SHORT_SESSION_S"
+                ):
+                    ps._session_pacer.reset()
                 # No viewer - go dormant; camera.stream_source() restarts us when
                 # someone opens the live view again.
                 await self._go_dormant(release_url=True, why="idle release")
