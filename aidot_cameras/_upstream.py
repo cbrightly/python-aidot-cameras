@@ -125,6 +125,10 @@ class _DeviceState(IntEnum):
 
 
 DeviceState = _DeviceState
+# The integration's tests (2.37.x and 2.38.x) read this to choose the shape of
+# the device-client stub they build, so it stays after the shape it chose
+# between was dropped: there is one shape now, upstream's enum, so it is True.
+DEVICE_STATE_IS_UPSTREAMS = True
 
 
 def device_session_authenticated(device_client: Any) -> bool:
@@ -358,6 +362,7 @@ __all__ = [
     "DeviceModel",
     "DeviceRecord",
     "DeviceState",
+    "DEVICE_STATE_IS_UPSTREAMS",
     "account_record",
     "account_refresh_token",
     "account_region",

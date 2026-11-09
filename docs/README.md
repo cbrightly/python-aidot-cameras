@@ -15,7 +15,9 @@ git history, and the CHANGELOG still names them where it cites them.
 | [CI-RUNNER.md](CI-RUNNER.md) | The self-hosted runner that validates each release against real cameras. |
 | [UPSTREAM.md](UPSTREAM.md) | How a new `python-aidot` release is taken in, and the two record shapes the code supports. |
 | [CODEMODS.md](CODEMODS.md) | The source rewrites kept as scripts, and how to run one again on a new base. |
-| [ROAD-TO-1.0.md](ROAD-TO-1.0.md) | What 1.0.0 asserts, the one open item (the two-week soak) and how its clock is set, and the closed items with where their evidence lives. |
+| [ROAD-TO-1.0.md](ROAD-TO-1.0.md) | What 1.0.0 asserted, the release rules that replaced its two-week soak bar from 1.0.0 on, and the closed items with where their evidence lives. |
+| [RELEASING.md](RELEASING.md) | The release routine, in order: review, live check, docs and wiki review, the library gate and publish, the integration proved on the reference installation before its public release. |
+| [PROTOCOL-INVENTORY.md](PROTOCOL-INVENTORY.md) | Every message between the official app and the cameras (MQTT methods, stream control commands, device properties, cloud endpoints) against what is implemented, skipped or still open. |
 
 ## Design notes - current behaviour, written when it was decided
 

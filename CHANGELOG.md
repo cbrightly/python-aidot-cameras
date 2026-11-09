@@ -13,6 +13,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   and the app reads it back for its label; so the setting is shared with the
   app even though the encode does not change for it on the cameras measured.
 
+### Changed
+- **`docs/RELEASING.md`** is the release routine from here, with a docs and
+  wiki review before every release; **`docs/PROTOCOL-INVENTORY.md`** lists
+  every message between the app and the cameras against what is implemented.
+- **`_upstream.DEVICE_STATE_IS_UPSTREAMS` is back**, as `True`: the public
+  integration's tests (2.37.x, 2.38.x) read it to shape their stub, and the
+  library's own CI runs that suite. The downstream job now runs the 2.38.0
+  suite rather than 2.37.15's.
+
 ### Fixed
 - **Controls ride the session `async_open_webrtc_stream` returned.** The
   resolution, PTZ and speaker controls looked for the session on an attribute

@@ -63,7 +63,7 @@ from .rtsp_publish import (
 from .sdes import (
     SdesSession,
 )  # re-exported (split into sdes.py); also the SDES return type
-from .controls import _CameraControlsMixin
+from .controls import _CameraControlsMixin, control_session
 from .sd_listing import _CameraSdMixin
 from .sd_playback import _CameraSdPlaybackMixin
 from .webrtc_open import _WebRTCOpenMixin
@@ -5955,7 +5955,7 @@ class CameraMixin(
         session could carry talk. Works for both DTLS and SDES cameras (same
         WebRTC audio path).
         """
-        session = self._control_session()
+        session = control_session(self)
         own_session = False
         if session is None or not getattr(session, "talk_supported", False):
             session = None

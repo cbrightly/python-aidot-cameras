@@ -44,6 +44,28 @@ LIGHT_BRIGHTNESS_MAX = 100
 _SETSTREAMCTRL_ACK_S = 1.5
 
 
+def control_session(dev):
+    """The session a control on ``dev`` rides: the serve loop's, else the one
+    the last ``async_open_webrtc_stream`` returned while it is still up.
+
+    The serve loop (Home Assistant's path) records its session on
+    ``_stream_session``; a caller of the public open used to find every
+    control answering "not streaming" with frames flowing, because that
+    session was never recorded anywhere (live_validate worked around it by
+    setting the private attribute itself). A session whose teardown has begun
+    (``_stop_task`` set) no longer counts. A function rather than only a
+    method so a path that is handed a bare client-like object (the speaker
+    path's tests do) reads it the same way.
+    """
+    session = getattr(dev, "_stream_session", None)
+    if session is not None:
+        return session
+    session = getattr(dev, "_direct_session", None)
+    if session is None or getattr(session, "_stop_task", None) is not None:
+        return None
+    return session
+
+
 class _CameraControlsMixin:
     """Device-control setters mixed into CameraMixin."""
 
@@ -507,23 +529,8 @@ class _CameraControlsMixin:
         return await self.async_ptz_move("stop", speed=0)
 
     def _control_session(self):
-        """The session a control rides: the serve loop's, else the one the last
-        ``async_open_webrtc_stream`` returned while it is still up.
-
-        The serve loop (Home Assistant's path) records its session on
-        ``_stream_session``; a caller of the public open used to find every
-        control answering "not streaming" with frames flowing, because that
-        session was never recorded anywhere (live_validate worked around it by
-        setting the private attribute itself). A session whose teardown has
-        begun (``_stop_task`` set) no longer counts.
-        """
-        session = self._stream_session
-        if session is not None:
-            return session
-        session = getattr(self, "_direct_session", None)
-        if session is None or getattr(session, "_stop_task", None) is not None:
-            return None
-        return session
+        """The session a control rides; see :func:`control_session`."""
+        return control_session(self)
 
     def _note_direct_session(self, session) -> None:
         """Record the session the public open returned, and give it the
