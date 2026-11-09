@@ -16,6 +16,7 @@ import math
 from typing import Optional
 
 from .. import settings
+from ..g711 import alaw2linear, linear2alaw
 
 # --------------------------------------------------------------------------- #
 # Audio gain on A-law bytes                                                    #
@@ -25,8 +26,8 @@ from .. import settings
 #: A-law byte -> linear sample, and the squares of those, precomputed. The
 #: publish loop runs per 20 ms audio frame on every camera, so the decode and
 #: the level measurement must not be per-sample Python.
-_ALAW_TO_LINEAR: tuple = ()
-_ALAW_SQUARES: tuple = ()
+_ALAW_TO_LINEAR = tuple(alaw2linear(b) for b in range(256))
+_ALAW_SQUARES = tuple(float(v) * v for v in _ALAW_TO_LINEAR)
 
 
 def _alaw_mean_square(payload: bytes) -> float:
@@ -35,10 +36,9 @@ def _alaw_mean_square(payload: bytes) -> float:
     return sum(sq[b] for b in payload) / len(payload)
 
 
-def _alaw_encode(sample: int) -> int:
-    from ..g711 import linear2alaw
-
-    return linear2alaw(sample)
+#: The G.711 codec, under the names ``rtsp_publish`` re-exports.
+_alaw_encode = linear2alaw
+_alaw_to_linear = alaw2linear
 
 
 def _db2amp(db: float) -> float:
@@ -46,35 +46,16 @@ def _db2amp(db: float) -> float:
     return 10.0 ** (db / 20.0)
 
 
-def _alaw_to_linear(a: int) -> int:
-    a ^= 0x55
-    t = (a & 0x0F) << 4
-    seg = (a & 0x70) >> 4
-    if seg == 0:
-        t += 8
-    elif seg == 1:
-        t += 0x108
-    else:
-        t = (t + 0x108) << (seg - 1)
-    return t if (a & 0x80) else -t
-
-
 def alaw_gain_table(gain_db: float) -> Optional[bytes]:
     """A 256-byte translate table applying ``gain_db`` to A-law, or None at 0 dB."""
     if not gain_db:
         return None
-    from ..g711 import linear2alaw
-
     k = 10 ** (gain_db / 20.0)
     out = bytearray(256)
     for a in range(256):
-        v = round(_alaw_to_linear(a) * k)
+        v = round(alaw2linear(a) * k)
         out[a] = linear2alaw(max(-32768, min(32767, v)))
     return bytes(out)
-
-
-_ALAW_TO_LINEAR = tuple(_alaw_to_linear(b) for b in range(256))
-_ALAW_SQUARES = tuple(float(v) * v for v in _ALAW_TO_LINEAR)
 
 
 class AlawAgc:

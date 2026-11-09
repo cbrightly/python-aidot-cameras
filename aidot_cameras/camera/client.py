@@ -23,6 +23,7 @@ from ..exceptions import (
 )
 from ..const import APP_ID as _AIDOT_APP_ID
 from ..const import (
+    LOGIN_INFO_MQTT_CREDENTIALS_KEY,
     LOGIN_INFO_MQTT_PASSWORD_KEYS,
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
@@ -34,7 +35,6 @@ from .constants import (
     _LEEDARSON_APP_ID,
     _LIVE_PLAY_NOT_READY,
     _SMARTHOME_URL_TEMPLATE,  # noqa: F401 - re-exported for back-compat; reads go through smarthome_base()
-    GETSTREAMCTRL_CMD,  # noqa: F401 - re-exported for back-compat (public pair; unused in-module)
     SDES_SPEAKERSTART_DELAY,  # noqa: F401 - used by the sdes_open mixin; kept re-exported
     aidot_api_base,
     mqtt_fallback_url,
@@ -53,11 +53,12 @@ from .models import (  # re-exported: data models split into models.py
 )
 from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
 from . import h264_sps as _h264_sps
+from .ts_fanout import TsServer
 from .rtsp_publish import (
     RESENT_MAX_BACK_S,
-    direct_publish_enabled,
     dtls_rtp_publish_run,
     is_publishable_url,
+    redact_url,
 )
 from .sdes import (
     SdesSession,
@@ -71,6 +72,7 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _mqtt_timestamp,
     is_resent_video_frame,
     ReconnectPacer,
+    _repeat_log_level,
     _build_stun_binding_success_response,
     _terminal_webrtc_ack,
     _install_highport_nomination_patch,
@@ -97,14 +99,9 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _battery_cap_spans_sessions_due,
     _battery_unknown_release_s,
     _stream_startup_grace_s,
-    _DirectTsServer,
     _serve_port,
     _dtls_av_mux_run,
     _h264_has_keyframe,
-    _mqtt_session_sync,
-    _mqtt_session,
-    _mqtt_session_with_status,
-    _mqtt_get_playback_server_info,
     _ip_looks_ascii_garbled,
     _normalize_bundle_ice_credentials,
     _reorder_m_section_ice_attrs,
@@ -120,6 +117,7 @@ from .protocol import (  # noqa: F401 - re-exported for device_client / back-com
     _parse_alarm_event,
 )
 from .. import settings
+from ..mqtt_config2 import broker_url as _mqtt_broker_url
 from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -162,33 +160,50 @@ def _is_transient_cloud_error(exc: BaseException) -> bool:
 # cloud explicitly reports a device offline, failed-open retries re-check the
 # flag every RECHECK seconds and only probe a real open every PROBE seconds,
 # instead of consuming an open-gate slot on the normal reconnect cadence.
-class _FfmpegMissing(RuntimeError):
-    """The serve needs an ffmpeg that is not there; see _release_after_loop_error."""
+class _ServeUnavailable(RuntimeError):
+    """The serve cannot run (its URL names no serve, or its port is taken);
+    see _release_after_loop_error."""
 
 
 _OFFLINE_RECHECK_S = settings.read("AIDOT_OFFLINE_RECHECK_S")
 _OFFLINE_PROBE_S = settings.read("AIDOT_OFFLINE_PROBE_S")
 
-# DTLS serve loop slow-probe: an idle-but-cloud-online camera (asleep, wedged
-# firmware, ...) never trips the offline pause above (the cloud keeps reporting
-# it reachable), so its failed opens would otherwise retry FOREVER at the
-# pacer's 300s cap - burning a 30s open timeout every attempt and dripping a
-# WARNING each time (see _open_fail_logger).  After
-# AIDOT_DTLS_SLOW_PROBE_THRESHOLD consecutive open failures (keyed on the
-# ReconnectPacer's attempt count - see _in_slow_probe / _probe_interval below -
-# NOT the cloud-offline flag, which this case never sets), the loop widens its
-# retry interval to AIDOT_DTLS_SLOW_PROBE_INTERVAL_S and downgrades the
-# per-attempt WARNING to a periodic INFO summary (_should_log_slow_probe).
-# Resets the instant an open succeeds, via the same ReconnectPacer.reset() the
-# loop already calls on success (attempt -> 0, so _in_slow_probe is false again
-# with no separate state to clear). Sessions that keep ending short are paced
-# by their own counter (_session_end_pacing) and never count towards this.
-_SLOW_PROBE_THRESHOLD = settings.read("AIDOT_DTLS_SLOW_PROBE_THRESHOLD")
-_SLOW_PROBE_INTERVAL_S = settings.read("AIDOT_DTLS_SLOW_PROBE_INTERVAL_S")
-_SLOW_PROBE_LOG_EVERY = settings.read("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY")
-# Sleep increment for the slow-probe wait: never one blocking
+# DTLS serve loop, failed opens: ONE jittered-backoff pacer for the ways an
+# open fails (ICE never connected, encoder not ready, anything else), from
+# 15 s up to a 600 s cap. Three things bend it:
+#
+# - a floor of AIDOT_BUSY_RETRY_S after an ICE failure, when the camera still
+#   holds the session it accepted and refuses a sooner retry as busy
+#   (2026-11-04, an A000088);
+# - at the cap the wait is 0.9-1.0 x the cap, never less;
+# - a camera the cloud reports offline waits the cap at once, ending early
+#   (never before the floor) if the cloud reports it back.
+#
+# A busy refusal stays on its own flat AIDOT_BUSY_RETRY_S and an encoder still
+# cold gets a short burst of quick retries first; neither moves the pacer.
+# The wide cap is for a camera that is idle but cloud-online: it never trips
+# the offline flag, and each retry costs an open timeout. At the cap the
+# per-attempt WARNING drops to an INFO line every _PACER_LOG_EVERY failures. A
+# successful open resets it.
+_DTLS_RETRY_BASE_S, _DTLS_RETRY_CAP_S = 15.0, 600.0
+#: Failures in a row between INFO lines once a pacer is quiet (the rest DEBUG).
+_PACER_LOG_EVERY = 6
+# Sleep increment for the loops' long waits (_chunked_wait): never one blocking
 # asyncio.sleep(interval) call, so stop() is not delayed by up to 10 minutes.
-_SLOW_PROBE_SLEEP_CHUNK_S = settings.read("AIDOT_DTLS_SLOW_PROBE_CHUNK_S")
+_WAIT_CHUNK_S = settings.read("AIDOT_DTLS_SLOW_PROBE_CHUNK_S")
+
+
+#: Quick retries for an encoder still cold (a DC-only answer), and how many.
+_NOT_READY_BURST_S, _NOT_READY_BURST_MAX = 3.0, 4
+
+
+def _not_ready_burst_delay(
+    burst: int, burst_max: int = _NOT_READY_BURST_MAX
+) -> Optional[float]:
+    """The quick retry for the ``burst``-th not-ready answer in a row (from 1),
+    or None once ``burst_max`` are spent: then the caller's own pacing, so a
+    persistently-cold camera is not hammered."""
+    return _NOT_READY_BURST_S if 0 < burst <= burst_max else None
 
 
 def _parse_env_float(name: str, default: float) -> float:
@@ -235,6 +250,9 @@ _DTLS_SERVE_ICE_WAIT_S = settings.read("AIDOT_DTLS_SERVE_ICE_WAIT_S")
 # discarded task can be garbage-collected mid-flight. Discarded on completion.
 _BG_TASKS: set = set()
 
+# The status error of a persistent request that found no connection to use.
+_NO_PERSISTENT_MQTT = "no persistent MQTT connection"
+
 # Minimum gap between MQTT credential refetches after the broker refused one.
 # One rotation is normal (another login happened); a second refusal that fast
 # means refetching is not helping, so back off rather than loop.
@@ -279,69 +297,48 @@ def _mqtt_publish_delivered(status) -> bool:
     return status.get("connected", True) is not False
 
 
-def _retry_policy(
-    failure_kind: str,
-    burst_attempt: int,
-    *,
-    burst_delay: float = 3.0,
-    burst_max: int = 4,
-    base_gate: float = 15.0,
-) -> "tuple[float, bool]":
-    """Return (delay_seconds, bypass_open_gate) for the DTLS serve retry.
-
-    A clean 'not_ready' decline (camera awake but encoder still cold - a DC-only
-    WebRTC answer) gets a bounded fast burst (burst_delay x burst_max) that
-    bypasses the 15s inter-attempt gate, then falls back to the normal gate so a
-    persistently-declining camera is not hammered.  Every other failure keeps
-    the unchanged 15s behaviour."""
-    if failure_kind == "not_ready" and burst_attempt <= burst_max:
-        return (burst_delay, True)
-    return (base_gate, False)
-
-
-# Short DTLS sessions (2026-11-04, an A000088): for half an hour its sessions
+# Failed DTLS sessions (2026-11-04, an A000088): for half an hour its sessions
 # died within seconds of opening and, because a connected open resets the
 # open-failure pacer, it was reopened on the bare 15 s gate every time -
-# hammering an A000088 like that is what wedges its DTLS stack (see _MIN_DELAY
-# in the loop). A session is short when it ends sooner than
+# hammering an A000088 like that is what wedges its DTLS stack (see
+# _DTLS_RETRY_BASE_S). A session FAILED when it ends sooner than
 # AIDOT_DTLS_SHORT_SESSION_S (read at each session end) after its open
-# succeeded, or ends without ever having delivered video (that camera answers
-# the same way on every open, measured 2026-08-17). Only a session that ends
-# on its own counts: an idle release (no viewer) returns from the loop before
-# any session-end pacing runs, so a camera nobody is watching is never paced
-# here however briefly its last session ran.
+# succeeded, or ends known to have delivered no video (that camera answers the
+# same way on every open, measured 2026-08-17). Only a session that ends on its
+# own counts: an idle release (no viewer) returns from the loop before any
+# session-end pacing runs, so a camera nobody is watching is never paced here
+# however briefly its last session ran.
 #
-# The wait after a short session: 30 s after the first, then jittered in
-# [30, 45] s, never more than 45 s. On a separate ReconnectPacer on the loop
-# state, kept apart from the open-failure pacer, so short sessions neither
-# inherit open failures from before a session nor push a camera into the slow
-# probe. Capped at 45 s, not the open pacer's 300 s, for the viewer: the serve
-# relay holds a pull for up to 90 s. In the typical case a pull that arrives
-# during the wait is still held when the serve comes back: at most 45 s of
-# wait, then a 16-25 s cold open and about 8 s to serve-ready. The worst case
-# can exceed 90 s - a slow open (up to AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S), up to
-# 12 s to install the taps, a slow serve-ready, or an ICE failure on the
-# reopen with its own AIDOT_BUSY_RETRY_S floor - and then the pull times out
-# and the viewer's player retries. The 2026-11-04 cadence goes from a reopen
-# every 15 s to one every 30-45 s plus the session's own life.
+# The wait after a failed session: 30 s after the first, then jittered in
+# [30, 45] s, never more than 45 s. On its own ReconnectPacer on the loop
+# state, kept apart from the open-failure pacer, so failed sessions neither
+# inherit open failures from before a session nor push the open pacer up.
+# Capped at 45 s, not the open pacer's 600 s, for the viewer: the serve relay
+# holds a pull for up to 90 s. In the typical case a pull that arrives during
+# the wait is still held when the serve comes back: at most 45 s of wait, then
+# a 16-25 s cold open and about 8 s to serve-ready. The worst case can exceed
+# 90 s - a slow open (up to AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S), up to 12 s to
+# install the taps, a slow serve-ready, or an ICE failure on the reopen with
+# its own AIDOT_BUSY_RETRY_S floor - and then the pull times out and the
+# viewer's player retries. After AIDOT_DTLS_FUTILE_VIDEO_LIMIT failures in a
+# row the serve stops reopening and goes dormant (_futile_video_limit).
 _SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S = 30.0, 45.0
-#: Short sessions in a row between INFO lines (the rest log at DEBUG).
-_SHORT_SESSION_LOG_EVERY = 6
 
 
-# A camera that closes a session itself after serving video is not a short
+# A camera that closes a session itself after serving video is not a failed
 # session, however short. Measured 2026-11-08 on an A000088 viewed from
 # outside its network: about one session in three ends 19.5-20.4 s after the
 # DTLS handshake with a DTLS close_notify from the camera - consent checks
 # answered to the end, the same signalling and data-channel traffic as a
 # session that runs on, never seen from the camera's own LAN. Pacing that as
-# short cost a viewer 30-45 s of no picture per close. Such a session reopens
-# on the open gate instead, as one that lasted does. It must have delivered
-# video and lived _CAMERA_CLOSE_MIN_S, so a camera that closes every session
-# at once still meets the backoff, and only _CAMERA_CLOSE_RUN_MAX of them in a
-# row reopen at once: a camera that keeps closing (another viewer taking its
-# one media slot, say) is paced as before rather than fought for the slot. At
-# one close in three, four in a row is about one session run in eighty.
+# a failure cost a viewer 30-45 s of no picture per close and sent the serve
+# dormant after AIDOT_DTLS_FUTILE_VIDEO_LIMIT of them in a row. Such a session
+# reopens on the open gate instead, as one that lasted does. It must have
+# delivered video and lived _CAMERA_CLOSE_MIN_S, so a camera that closes every
+# session at once still meets the backoff, and only _CAMERA_CLOSE_RUN_MAX of
+# them in a row reopen at once: a camera that keeps closing (another viewer
+# taking its one media slot, say) is paced as before rather than fought for
+# the slot. At one close in three, four in a row is about one run in eighty.
 _CAMERA_CLOSE_MIN_S = 10.0
 _CAMERA_CLOSE_RUN_MAX = 3
 
@@ -373,33 +370,35 @@ def _camera_closed_session(pc: Any) -> bool:
         return False
 
 
-def _session_end_pacing(
+def _session_end_wait(
     pacer: "ReconnectPacer",
     lived_s: float,
     *,
-    had_video: bool,
+    no_video: bool,
     threshold_s: float,
+    limit: int,
     camera_closed: bool = False,
-) -> float:
+) -> Optional[float]:
     """Seconds to wait before reopening after a DTLS session that lived
-    ``lived_s``, on the loop's short-session ``pacer``.
+    ``lived_s``, on the loop's session ``pacer``; None to stop reopening.
 
-    A session that lasted ``threshold_s`` and delivered video (in any of its
-    serve cycles, whatever its last one did; with no video canary to read,
-    unless the presence watchdog declared it video-less, which includes one
-    that ended before the watchdog ruled) resets the pacer and the loop
-    reopens on its open gate (0), and so does one the camera closed itself
-    once it lived _CAMERA_CLOSE_MIN_S: ``camera_closed`` is the caller's word
-    that the camera sent a close_notify after video was SEEN (not merely not
-    ruled out) and that the run of such closes is within
-    _CAMERA_CLOSE_RUN_MAX. Any other session is a failure of the pacer: 30 s
-    the first time, then up to 45 s."""
-    if had_video and (
+    A session that lasted ``threshold_s`` and is not known to have had no
+    video resets the pacer and the loop reopens on its open gate (0), and so
+    does one the camera closed itself once it lived _CAMERA_CLOSE_MIN_S:
+    ``camera_closed`` is the caller's word that the camera sent a close_notify
+    after video was SEEN and that the run of such closes is within
+    _CAMERA_CLOSE_RUN_MAX. Any other session is a
+    failure: 30 s the first time, then up to 45 s, and None once ``limit``
+    (0: no limit) failures have come in a row."""
+    if not no_video and (
         lived_s >= threshold_s or (camera_closed and lived_s >= _CAMERA_CLOSE_MIN_S)
     ):
         pacer.reset()
         return 0.0
-    return pacer.fail_delay()
+    delay = pacer.fail_delay()
+    if limit and pacer.attempt >= limit:
+        return None
+    return delay
 
 
 def _open_gate_delay(last_open_at: float, now: float, open_gate: float) -> float:
@@ -419,13 +418,6 @@ def _open_gate_delay(last_open_at: float, now: float, open_gate: float) -> float
         return 0.0
     remaining = open_gate - (now - last_open_at)
     return remaining if remaining > 0 else 0.0
-
-
-def _in_slow_probe(attempt: int, threshold: int) -> bool:
-    """True once `attempt` consecutive DTLS open failures have reached
-    `threshold`: the serve loop should stop hammering an idle-but-cloud-online
-    camera at the pacer's normal cadence and fall back to a slow probe."""
-    return attempt >= threshold
 
 
 #: RTP timestamps are 32 bits wide.
@@ -687,46 +679,21 @@ def _video_has_started(canary: Optional[dict]) -> bool:
 
 
 def _futile_video_limit(env: Optional[dict] = None) -> int:
-    """Consecutive video-less DTLS sessions before the loop stops re-opening.
+    """Consecutive failed DTLS sessions (short, or known to have had no video)
+    before the loop stops re-opening and goes dormant.
 
     Noticing is only half the fix.  The camera that prompted this answers the
     same way on every fresh open, and a video-less session is otherwise a CLEAN
     open - so a loop that simply re-opened would wake the camera after every
-    short-session wait (30-45 s, _dtls_serve_loop_session_end) indefinitely,
-    which is not an improvement on staying quiet.
+    session-end wait (30-45 s, _dtls_serve_loop_session_end) indefinitely,
+    which is not an improvement on staying quiet. A session that dies short
+    every time is the same case, and counts on the same pacer.
 
     ``AIDOT_DTLS_FUTILE_VIDEO_LIMIT=0`` disables the abandon.  Mirrors
     AIDOT_FUTILE_KEEPALIVE_LIMIT on the SDES path, which exists for the same
     reason.
     """
     return settings.read("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", env)
-
-
-def _probe_interval(
-    attempt: int, threshold: int, normal_delay: float, slow_interval: float
-) -> float:
-    """Effective DTLS-open retry interval for a failed open.
-
-    Below `threshold` consecutive failures this is just the pacer's own
-    `normal_delay` (unchanged jittered-backoff behaviour). At/after `threshold`
-    it widens to (at least) `slow_interval` - well beyond the pacer's own cap -
-    so a camera that is cloud-online but never actually opens is probed
-    roughly every `slow_interval` seconds instead of retried forever at the
-    pacer's max cadence."""
-    if _in_slow_probe(attempt, threshold):
-        return max(normal_delay, slow_interval)
-    return normal_delay
-
-
-def _should_log_slow_probe(attempt: int, threshold: int, log_every: int) -> bool:
-    """True when a slow-probe open failure should be logged: the moment
-    slow-probe is entered, then every `log_every`th attempt after - so a
-    camera stuck for hours doesn't drip a log line on every single probe."""
-    if not _in_slow_probe(attempt, threshold):
-        return False
-    if log_every <= 0:
-        return True
-    return (attempt - threshold) % log_every == 0
 
 
 _FFMPEG_MISSING_MSG = (
@@ -873,6 +840,29 @@ def _is_http_serve_url(url) -> bool:
     """True for a pull serve (``http://...``) - the only kind the direct TS
     server can stand in for. ``-`` (stdout) and ``rtsp://`` (push) are not."""
     return str(url or "").lower().startswith("http://")
+
+
+def _dtls_serve_mode(url) -> str:
+    """Where the DTLS serve sends a camera's media, by its serve URL.
+
+    - ``rtsp://`` -> ``"publish"``: the direct publish (``dtls_rtp_publish_run``)
+      pushes H.264 and A-law, plus AAC unless ``AIDOT_PUBLISH_AAC`` is off.
+      Whatever ``AIDOT_DIRECT_PUBLISH`` says: the ffmpeg push it used to fall
+      back to transcoded the mux's AAC back to A-law, which the publish
+      already sends as the camera's own.
+    - ``-`` -> ``"stdout"``: the mux's MPEG-TS on this process's stdout, for a
+      go2rtc ``exec:`` source, which owns the process's lifecycle.
+    - ``http://`` -> ``"pull"``: the mux's MPEG-TS served to whoever dials the
+      URL's port (go2rtc).
+    - anything else -> ``"none"``: nothing can serve it.
+    """
+    if is_publishable_url(url):
+        return "publish"
+    if url == "-":
+        return "stdout"
+    if _is_http_serve_url(url):
+        return "pull"
+    return "none"
 
 
 def _resolve_serve_input_timeout_s(is_battery: bool) -> int:
@@ -1488,14 +1478,18 @@ class _DtlsServeLoopState:
     # the loop, open_attempt, prepare_session
     _not_ready_burst: "Any" = dataclasses.field(init=False)
     # prepare_session, serve_cycle; read by session_end
-    _session_had_video: "Any" = dataclasses.field(init=False)
+    _session_video_seen: "Any" = dataclasses.field(init=False)
+    # prepare_session, serve_cycle; read by session_end
+    _session_video_known: "Any" = dataclasses.field(init=False)
     # prepare_session; read by session_end
     _session_opened_at: "Any" = dataclasses.field(init=False)
     # prepare_session, serve_cycle; read by session_end
     _session_ended_at: "Any" = dataclasses.field(init=False)
+    # Why the last serve cycle stopped, for the session-end log line.
+    _session_end_reason: "Any" = dataclasses.field(init=False)
     # the loop, session_end: camera-closed sessions in a row (_CAMERA_CLOSE_RUN_MAX)
     _camera_close_run: "Any" = dataclasses.field(init=False)
-    _short_pacer: "Any" = dataclasses.field(init=False)  # the loop
+    _session_pacer: "Any" = dataclasses.field(init=False)  # the loop
     loop: "Any" = dataclasses.field(init=False)  # the loop
     vq: "Any" = dataclasses.field(init=False)  # open_attempt
     aq: "Any" = dataclasses.field(init=False)  # open_attempt
@@ -1505,7 +1499,6 @@ class _DtlsServeLoopState:
     # prepare_session; read by serve_cycle's check and session_end
     _pc_bad_box: "Any" = dataclasses.field(init=False)
     idle_secs: "Any" = dataclasses.field(init=False)  # prepare_session
-    proc: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
     wfile: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
     stop_flag: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
     mux_thread: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
@@ -1536,7 +1529,7 @@ async def _dtls_serve_loop_open_attempt(
     # After a session that lasted it has long elapsed, so a clean death
     # reopens immediately; a fast death owes at least the full gate, though
     # the loop has usually already waited longer than that in its
-    # session-end pacing (_session_end_pacing).
+    # session-end pacing (_session_end_wait).
     _gate_wait = _open_gate_delay(ps._last_open_at, ps.loop.time(), ps._open_gate)
     if _gate_wait:
         try:
@@ -1552,104 +1545,68 @@ async def _dtls_serve_loop_open_attempt(
         )
     except asyncio.CancelledError:
         return _PhaseReturn(None)
-    except AidotCameraBusy as busy:
-        # Another viewer holds the camera's single slot. Retry on a short
-        # interval (not the 5-min backoff) so it reconnects promptly once
-        # the slot frees (e.g. the user closes the app / reboots the cam).
-        busy_retry = settings.read("AIDOT_BUSY_RETRY_S")
-        _LOGGER.warning(
-            "DTLS serve: camera %s busy (%s) - retrying in %.0fs",
-            self.device_id,
-            busy,
-            busy_retry,
-        )
-        try:
-            # Chunked, so a stop ends it at once.
-            await self._slow_probe_sleep(busy_retry)
-        except asyncio.CancelledError:
-            return _PhaseReturn(None)
-        return _LoopContinue()
-    except AidotCameraNotReady:
-        # Camera answered cleanly but declined media (DC-only answer):
-        # its encoder is still cold and warming up.  Fast-retry in a
-        # bounded burst (3s x4) that bypasses the 15s inter-attempt gate
-        # so we catch the encoder the moment it comes up, then fall back
-        # to the gate so a persistently-cold camera isn't hammered.  The
-        # burst counter resets only on a successful open (below).
-        ps._not_ready_burst += 1
-        _delay, _bypass = _retry_policy("not_ready", ps._not_ready_burst)
-        if _bypass:
-            ps._last_open_at = 0.0  # clear the gate for the fast burst
-        _LOGGER.info(
-            "DTLS serve: camera %s not ready (encoder cold) - retry %.0fs [%s]",
-            self.device_id,
-            _delay,
-            "burst" if _bypass else "gate",
-        )
-        try:
-            await asyncio.sleep(_delay)
-        except asyncio.CancelledError:
-            return _PhaseReturn(None)
-        return _LoopContinue()
     except Exception as exc:
-        _delay = ps._pacer.fail_delay()
+        # Failed opens are paced on one pacer (see _DTLS_RETRY_BASE_S), with
+        # two exceptions that leave it untouched. A busy refusal (another
+        # viewer holds the camera's single slot) waits a flat
+        # AIDOT_BUSY_RETRY_S, so the serve comes back within that of the slot
+        # freeing. An encoder still cold (a DC-only answer) gets a short burst
+        # of quick retries first (_not_ready_burst_delay).
+        _offline = _cloud_reports_offline(self)
+        _busy_s = settings.read("AIDOT_BUSY_RETRY_S")
         _floor = 0.0
-        if isinstance(exc, AidotIceNotEstablished):
-            # The camera accepted the offer and still holds the session that
-            # never connected; asked again before it lapses it refuses as
-            # busy, which is what every retry did on 2026-11-04 (an A000088,
-            # twelve times in twenty minutes). Wait as long as after a busy
-            # refusal: the cause is the same, a session the camera holds.
-            # A floor (min_s below), which the offline pause's early return on
-            # the camera coming back online does not cut short.
-            _floor = settings.read("AIDOT_BUSY_RETRY_S")
-        _attempt = ps._pacer.attempt
-        _cloud_offline = _cloud_reports_offline(self)
-        # Slow-probe throttle: an idle-but-cloud-online camera never
-        # sets _cloud_offline (the cloud keeps reporting it reachable),
-        # so without this it would retry forever at the pacer's cap.
-        # Keyed purely on the pacer's consecutive-failure count, not
-        # the offline flag - a genuinely offline camera already gets a
-        # comparable slow cadence (with early-resume) from
-        # _backoff_or_offline_pause below, so this only engages the
-        # part of the space that pause doesn't already cover.
-        if _in_slow_probe(_attempt, _SLOW_PROBE_THRESHOLD) and not _cloud_offline:
-            # The busy floor holds here too, whatever the probe interval is
-            # set to.
-            _delay = max(
-                _probe_interval(
-                    _attempt, _SLOW_PROBE_THRESHOLD, _delay, _SLOW_PROBE_INTERVAL_S
-                ),
-                _floor,
-            )
-            if _should_log_slow_probe(
-                _attempt, _SLOW_PROBE_THRESHOLD, _SLOW_PROBE_LOG_EVERY
-            ):
-                _LOGGER.info(
-                    "DTLS serve: %s still failing to open after %d"
-                    " attempts - slow-probing every %.0fs (last error: %s)",
-                    self.device_id,
-                    _attempt,
-                    _delay,
-                    exc,
+        _burst = None
+        if isinstance(exc, AidotCameraNotReady):
+            ps._not_ready_burst += 1
+            _burst = _not_ready_burst_delay(ps._not_ready_burst)
+        if isinstance(exc, AidotCameraBusy):
+            _offline = False  # it answered
+            _delay = _floor = _busy_s
+            _level = logging.WARNING
+        elif _burst is not None:
+            _offline = False  # it answered
+            _delay = _burst
+            ps._last_open_at = 0.0  # the burst does not wait out the gate
+            _level = logging.INFO  # an encoder warming up, not a fault
+        else:
+            if isinstance(exc, AidotIceNotEstablished):
+                # The camera accepted the offer and still holds the session
+                # that never connected; asked again before it lapses it
+                # refuses as busy, which is what every retry did on 2026-11-04
+                # (an A000088, twelve times in twenty minutes). A floor, which
+                # the early end of an offline wait does not cut short.
+                _floor = _busy_s
+            # At the cap the pacer draws between 0.9 x cap and cap.
+            _delay = max(ps._pacer.fail_delay(), _floor)
+            if _offline:
+                # Gone, says the cloud: the cap at once, cut short (never
+                # before the floor) if the cloud reports it back.
+                _delay = max(_delay, _DTLS_RETRY_CAP_S)
+            if _offline or ps._pacer.at_cap:
+                _level = _repeat_log_level(
+                    ps._pacer.attempt - 1, every=_PACER_LOG_EVERY
                 )
-            try:
-                await self._slow_probe_sleep(_delay)
-            except asyncio.CancelledError:
-                return _PhaseReturn(None)
-            return _LoopContinue()
-        # The wait that will actually run: the offline pause when the cloud
-        # says the camera is gone, else the backoff or the busy floor.
-        self._open_fail_logger()(
-            "DTLS serve: open failed for %s (retry %s): %s",
+            elif isinstance(exc, AidotCameraNotReady):
+                _level = logging.INFO
+            else:
+                _level = logging.WARNING
+        _n = ps._pacer.attempt
+        _LOGGER.log(
+            _level,
+            "DTLS serve: open failed for %s (retry %s; %d in a row): %s",
             self.device_id,
-            "after the offline pause"
-            if _cloud_offline
-            else f"{max(_delay, _floor):.0f}s",
+            f"in up to {_delay:.0f}s, sooner once back online"
+            if _offline
+            else f"{_delay:.0f}s",
+            _n,
             exc,
         )
         try:
-            await self._backoff_or_offline_pause(_delay, min_s=_floor)
+            await self._chunked_wait(
+                _delay,
+                until=(lambda: bool(self.status.online)) if _offline else None,
+                min_s=_floor,
+            )
         except asyncio.CancelledError:
             return _PhaseReturn(None)
         return _LoopContinue()
@@ -1664,12 +1621,13 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     ``continue``, ``break`` or ``return`` of the loop, else None.
     """
     ps._pacer.reset()
-    ps._not_ready_burst = 0  # clean open: reset the encoder-cold burst
-    # When the session began, for _session_end_pacing: from the open's success,
+    ps._not_ready_burst = 0  # clean open: the encoder is warm
+    # When the session began, for _session_end_wait: from the open's success,
     # not its start, so a slow open cannot carry a dying session past the
     # short-session threshold.
     ps._session_opened_at = ps.loop.time()
     ps._session_ended_at = ps._session_opened_at  # serve_cycle moves it on
+    ps._session_end_reason = "stopped before serving"
     self._stream_session = ps.session
     ps.pc = ps.session._pc
     # PC-dead test for the serve loop.  closed/failed are terminal at
@@ -1718,17 +1676,17 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
         await asyncio.sleep(0.3)
         if ps._pc_dead():  # also stamps when the PC went bad
             break  # no session to tap; the serve cycle ends at once
-    # Whether this session delivered video, for the short-session pacing,
-    # decided once per session now the taps are in. With a video canary to
-    # read: False until a cycle sees a keyframe (True). Without one (the tap
-    # found no decoder queue to hang it on), "no keyframe seen" means "cannot
-    # tell", which must not make every session short: None, read as video
-    # unless a cycle's presence watchdog declares no video (False). So such a
-    # session that ends before the watchdog rules - inside its grace, at any
-    # AIDOT_DTLS_VIDEO_GRACE_S, or with the watchdog off - counts as having
-    # had video and is not paced as short: unknown means do not back off.
-    _canary = _current_video_canary(self, ps.pc)
-    ps._session_had_video = False if _canary is not None else None
+    # Whether this session delivered video, for the session-end pacing: seen
+    # once any cycle sees a keyframe, and known when there is a video canary
+    # to read (from now, the taps being in) or a cycle's presence watchdog
+    # declares no video. A session is video-less only when known and not
+    # seen. Without a canary (the tap found no decoder queue to hang it on)
+    # "no keyframe seen" means "cannot tell", which must not fail every
+    # session: one that ends before the watchdog rules - inside its grace, at
+    # any AIDOT_DTLS_VIDEO_GRACE_S, or with the watchdog off - is judged on
+    # how long it lived alone. Unknown means do not back off.
+    ps._session_video_seen = False
+    ps._session_video_known = _current_video_canary(self, ps.pc) is not None
 
     # The release window. HA's stream worker waits 10, 20, 30 ... s
     # between retries (+10 s each, stream/__init__.py _run_worker), and
@@ -1750,7 +1708,7 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
         # dormant while it still holds the process - a live producer
         # that has quietly stopped producing.
         ps.idle_secs = 0.0
-    ps.proc = ps.wfile = ps.stop_flag = ps.mux_thread = None
+    ps.wfile = ps.stop_flag = ps.mux_thread = None
     ps.cancelled = ps.idle_release = False
     ps._pub_fail_n = 0
     # Start-up grace (see the SDES loop): before the first viewer of
@@ -1775,8 +1733,8 @@ async def _dtls_serve_loop_serve_cycle(
     import threading as _threading
 
     try:
-        # (Re)start the ffmpeg serve whenever go2rtc (re)connects, while
-        # the warm WebRTC session keeps delivering encoded frames.
+        # (Re)start the serve whenever go2rtc (re)connects, while the warm
+        # WebRTC session keeps delivering encoded frames.
         while self._streaming_active and not ps._pc_dead():
             # Drain any backlog so a (re)connect starts on a fresh GOP.
             for _q2 in (ps.vq, ps.aq):
@@ -1786,84 +1744,42 @@ async def _dtls_serve_loop_serve_cycle(
                 except _queue.Empty:
                     pass
             await self._send_video_pli(ps.pc)  # request a clean keyframe
-            # With the relay holding the public port, ffmpeg listens on a
-            # fresh internal port each cycle and the relay splices to it;
-            # without it, ffmpeg owns the public port directly (old path).
-            _relay = self._serve_relay
-            if _relay is not None:
-                _ff_port = _grab_free_port()
-                _ff_url = _rewrite_serve_port(ps.serve_url, _ff_port)
-            else:
-                _ff_port = None
-                _ff_url = ps.serve_url
-            # Serve the muxed TS straight to the consumer on any http://
-            # serve URL that direct publish does not take.
-            # The `-c copy` ffmpeg hop re-packetizes MPEG-TS this mux
-            # already wrote in the form go2rtc wants, and measured
-            # 2026-08-20 it is the one component that LOSES timestamps
-            # (64,981 PES leave the mux with both, 8 of ffmpeg's 12,729
-            # carry none) - which go2rtc renders as RTP timestamp 0 and
-            # HA reports as a negative DTS. See _DirectTsServer.
-            _direct = None
-            # Direct RTSP publish (AIDOT_DIRECT_PUBLISH): the tapped
-            # frames are packetized and published into go2rtc on a
-            # thread - no ffmpeg, no listen port for go2rtc to dial.
-            # Checked before the direct TS serve, which would otherwise
-            # try to BIND the rtsp:// URL's port (go2rtc's own).
-            _publishing = direct_publish_enabled(
-                settings.stream_settings_of(self)
-            ) and is_publishable_url(ps.serve_url)
+            # Where this cycle's media goes (see _dtls_serve_mode): published
+            # over RTSP, written to stdout, or served to a pulling consumer.
+            # No mode runs ffmpeg: the mux's MPEG-TS is served as written.
+            _mode = _dtls_serve_mode(ps.serve_url)
+            _publishing = _mode == "publish"
+            _mux_state: dict = {}
             if _publishing:
-                pass
-            elif _is_http_serve_url(ps.serve_url):
-                # Only an http:// serve is one go2rtc DIALS. For "-"
-                # this bound a random port and wrote nothing to stdout
-                # (so `aidot-go2rtc <dtls-id> -` produced no media),
-                # and for rtsp:// it bound the push target's port
-                # locally instead of publishing to it.
-                # Bind the port the consumer was TOLD about. `_ff_port`
-                # is only set on the relay branch, so `_ff_port or 0`
-                # bound a random ephemeral port whenever no relay was
-                # running - go2rtc dialled the advertised port, found
-                # nothing, and answered DESCRIBE with 404 while the
-                # server itself was working.
-                _direct_port = _ff_port or _serve_port(ps.serve_url) or 0
-                _direct = _DirectTsServer(_direct_port)
-                try:
-                    _direct.start()
-                except OSError as _exc:
-                    _LOGGER.warning(
-                        "camera %s: direct serve could not bind (%s)"
-                        " - falling back to the ffmpeg hop",
-                        getattr(self, "device_id", "?"),
-                        _exc,
-                    )
-                    _direct = None
-            if _publishing:
-                ps.proc = None
                 ps.wfile = None
-            elif _direct is not None:
-                ps.proc = None
-                ps.wfile = _direct
-                if _relay is not None:
-                    _relay.set_backend(_direct.port)
+            elif _mode == "stdout":
+                # The go2rtc exec: source reads this process's stdout. A
+                # duplicate of fd 1, so closing it at the end of the cycle
+                # leaves stdout open for the next one.
+                ps.wfile = os.fdopen(os.dup(1), "wb", buffering=0)
+            elif _mode == "pull":
+                # The camera's TsServer, bound on the advertised port for the
+                # whole serve loop (see _dtls_serve_loop); open() binds it if
+                # that failed. Each cycle's mux writes through its own sink.
+                if self._ts_serve is None:
+                    self._ts_serve = TsServer(_serve_port(ps.serve_url) or 0)
+                try:
+                    ps.wfile = self._ts_serve.open()
+                except OSError as exc:
+                    raise _ServeUnavailable(
+                        "serve port %s could not be bound (%s)"
+                        % (self._ts_serve.port, exc)
+                    ) from exc
                 _LOGGER.info(
-                    "camera %s: serving TS directly on port %d (no ffmpeg hop)",
+                    "camera %s: serving TS directly on port %d",
                     getattr(self, "device_id", "?"),
-                    _direct.port,
+                    self._ts_serve.port,
                 )
             else:
-                rfd, wfd = os.pipe()
-                ps.proc = await self._spawn_dtls_serve_ffmpeg(_ff_url, rfd)
-                os.close(rfd)
-                if ps.proc is None:
-                    os.close(wfd)
-                    # Not a retry: without ffmpeg every cycle would
-                    # reopen the camera 15 s later and fail the same way.
-                    raise _FfmpegMissing("ffmpeg could not be started")
-                if _relay is not None:
-                    _relay.set_backend(_ff_port)
-                ps.wfile = os.fdopen(wfd, "wb", buffering=0)
+                raise _ServeUnavailable(
+                    "no DTLS serve for %r: use http://, rtsp:// or -"
+                    % redact_url(str(ps.serve_url))
+                )
             progress = [ps.loop.time()]
             ps.stop_flag = _threading.Event()
             _publish_result: dict = {}
@@ -1879,12 +1795,12 @@ async def _dtls_serve_loop_serve_cycle(
                 ps.mux_thread = _threading.Thread(
                     target=_dtls_av_mux_run,
                     args=(ps.vq, ps.aq, ps.wfile, progress, ps.stop_flag),
+                    kwargs={"state": _mux_state},
                     daemon=True,
                 )
             ps.mux_thread.start()
-            # Once the mux is feeding and ffmpeg has had a moment to bind
-            # its -listen socket, signal "serve ready" so stream_source can
-            # hand HA a working URL (no 40s connection-refused retry gap).
+            # Once the mux is feeding, signal "serve ready" so stream_source
+            # can hand HA a working URL (no 40s connection-refused retry gap).
             if not self._serve_ready.is_set():
                 _p0 = progress[0]
                 _dead = False
@@ -1895,12 +1811,10 @@ async def _dtls_serve_loop_serve_cycle(
                     _dead = ps._pc_dead()
                     if _dead or progress[0] > _p0:
                         break
-                # ffmpeg binds its -listen socket at startup, so by the time
-                # the mux has written a frame (progress moved above) the
-                # socket is long bound.  A short margin is plenty; the old
-                # 2.0s blind wait was pure cold-start latency.  (Don't probe
-                # the port - `-listen 1` would consume our probe as its one
-                # client and tear down before go2rtc connects.)
+                # The serve is bound before the mux starts, so once a frame
+                # has been written (progress moved above) it is ready; the
+                # short margin below is kept from the ffmpeg serve, whose
+                # -listen socket needed it.
                 if not _dead:
                     # A dead session is not "serving": the cycle below ends
                     # on its first check instead.
@@ -1943,24 +1857,22 @@ async def _dtls_serve_loop_serve_cycle(
             # report, not every half second.
             _health_dtls = HealthReporter(self.device_id)
             _watching_dtls = None
-            # Wait for ffmpeg to exit (go2rtc disconnect) or idle
-            # release. On the direct path there is no ffmpeg to exit, so
-            # the cycle runs until the peer connection dies or the view
-            # is released. `proc` is None there, and dereferencing it
-            # here threw an AttributeError the instant the mux started -
-            # which made two live trials of the direct serve look like a
-            # go2rtc DESCRIBE failure when the serve cycle had simply
-            # died on its first iteration.
-            while self._streaming_active and (
-                ps.proc is None or ps.proc.returncode is None
-            ):
+            # Serve until the peer connection dies, the view is released,
+            # or the mux or publish thread ends on its own.
+            _why = "serve stopped"
+            while self._streaming_active:
                 await asyncio.sleep(0.5)
                 if ps._pc_dead():
+                    _why = "connection " + str(
+                        getattr(ps.pc, "connectionState", "closed")
+                    )
                     break
-                if _publishing and not ps.mux_thread.is_alive():
+                if not ps.mux_thread.is_alive():
+                    _why = "publish ended"
                     # The publish ended (go2rtc gone, stream missing,
-                    # connection dropped): end this cycle; the next one
-                    # republishes after a short backoff.
+                    # connection dropped) or the mux could not write: end
+                    # this cycle; the next one starts over after a short
+                    # backoff.
                     break
                 _now = ps.loop.time()
                 if _health_dtls.due(_now):
@@ -1992,15 +1904,14 @@ async def _dtls_serve_loop_serve_cycle(
                     == "give-up"
                 ):
                     _no_video = True
-                    self._futile_video_runs = getattr(self, "_futile_video_runs", 0) + 1
                     _LOGGER.warning(
                         "camera %s: DTLS session connected but delivered "
                         "no video in %.0fs (audio may be flowing) - "
-                        "re-opening [%d consecutive]",
+                        "re-opening",
                         self.device_id,
                         _vid_grace,
-                        self._futile_video_runs,
                     )
+                    _why = "no video"
                     break
                 _stall = _now - progress[0]
                 if _stall < 0.5:
@@ -2062,15 +1973,15 @@ async def _dtls_serve_loop_serve_cycle(
                         ps.idle_release = True
                     # Only an actual idle release ends this serve cycle.
                     # (This break was unconditional - any idle_secs > 0
-                    # tore down a HEALTHY ffmpeg after one 0.5s tick,
-                    # respawning it forever: ffmpeg died at output-open
-                    # with "Immediate exit requested" and every DTLS
-                    # camera served nothing. stream_idle_s=0 masked it,
-                    # which is why never-release fleets still worked.)
+                    # tore down a HEALTHY serve after one 0.5s tick,
+                    # restarting it forever, and every DTLS camera served
+                    # nothing. stream_idle_s=0 masked it, which is why
+                    # never-release fleets still worked.)
                     if ps.idle_release:
+                        _why = "idle release"
                         break
             # Read the canary once more however the cycle ended: a break on a
-            # dead PC or an exited publish thread, or ffmpeg exiting, comes
+            # dead PC or an exited mux or publish thread comes
             # before the in-loop check, and a cycle that delivered video
             # would otherwise be recorded as video-less (then a long session
             # with video is paced as short). Not after a no-video verdict,
@@ -2082,13 +1993,20 @@ async def _dtls_serve_loop_serve_cycle(
             ):
                 _first_video_at = ps.loop.time()
             # When this cycle stopped serving, taken before the teardown
-            # below (a mux join of up to 2 s, a publish backoff of up to
-            # 10 s, then the session's stop), which would otherwise carry a
+            # below (a mux join of up to 2 s, a backoff of up to 10 s, then
+            # the session's stop), which would otherwise carry a
             # session that died at 25 s past the 30 s short-session
             # threshold. The session's end is worked out from it once, in
             # _dtls_serve_loop_session_end.
             ps._session_ended_at = ps.loop.time()
-            # Tear down this ffmpeg+mux cycle before the next.
+            # The last media is what tells a camera that stopped sending from
+            # a connection that dropped under a flowing stream.
+            ps._session_end_reason = "%s, last media %.1fs before" % (
+                _why,
+                max(0.0, ps._session_ended_at - progress[0]),
+            )
+            # Tear down this cycle's serve and mux before the next.
+            _mux_ended = not ps.mux_thread.is_alive()
             ps.stop_flag.set()
             try:
                 if ps.wfile is not None:
@@ -2103,58 +2021,38 @@ async def _dtls_serve_loop_serve_cycle(
             ps.wfile = None
             ps.mux_thread.join(timeout=2.0)
             ps.mux_thread = ps.stop_flag = None
-            if _relay is not None:
-                _relay.set_backend(None)  # no backend until next ffmpeg
-            _terminate_proc(ps.proc)
-            ps.proc = None
-            if _publishing and _publish_result.get("error"):
-                # Do not spin on a go2rtc that is down or restarting.
+            if _mode == "stdout" and _mux_ended and _mux_state.get("failed"):
+                # Whoever read our stdout has gone (go2rtc kills an exec
+                # source it no longer reads, so this is rare): there is no
+                # one to serve until the next view. Only when the mux ended
+                # on its own: one still running when the cycle ended makes
+                # its final flush into the pipe closed above, and that
+                # failed write is this teardown, not the reader (2026-11-08:
+                # every session end released a stdout serve that way).
+                _LOGGER.info(
+                    "camera %s: stdout is no longer read - releasing",
+                    getattr(self, "device_id", "?"),
+                )
+                ps.idle_release = True
+            elif (_publishing and _publish_result.get("error")) or (
+                not _publishing and _mux_ended
+            ):
+                # Do not spin on a go2rtc that is down or restarting, or on a
+                # mux that cannot run.
                 ps._pub_fail_n += 1
                 await asyncio.sleep(min(10.0, 1.0 * (2 ** (ps._pub_fail_n - 1))))
-            elif _publishing:
+            else:
                 ps._pub_fail_n = 0
             if _first_video_at is not None:
-                # A session that delivered video clears the futile run:
-                # the count is about CONSECUTIVE video-less sessions.
-                self._futile_video_runs = 0
-                ps._session_had_video = True
-            elif _no_video and ps._session_had_video is None:
-                # No canary to read, and the watchdog said no video: that is
-                # a verdict, not a presumption (see prepare_session).
-                ps._session_had_video = False
+                ps._session_video_seen = True
             if _no_video:
-                # A session that never delivers video is paced at its end as
-                # a short session (_session_end_pacing) - the camera answered
-                # this way on every open measured 2026-08-17, so it must not
-                # reopen on the bare gate. It no longer also escalates the
-                # open-failure pacer (it did until 2026-11-04): that paced it
-                # twice and moved a camera whose opens SUCCEED towards the
-                # slow probe. _session_had_video is left as it is: a session
-                # whose earlier cycles delivered video is paced on how long
-                # it lasted, not on how its last cycle ended.
-                _limit = _futile_video_limit()
-                if _limit and self._futile_video_runs >= _limit:
-                    _LOGGER.warning(
-                        "camera %s: %d consecutive DTLS sessions "
-                        "delivered no video - stopping the background "
-                        "serve. The session connects and the camera "
-                        "sends audio only; re-opening cannot fix that "
-                        "and keeps the camera busy. A live view will "
-                        "still open a session; set "
-                        "AIDOT_DTLS_FUTILE_VIDEO_LIMIT=0 to keep "
-                        "retrying.",
-                        self.device_id,
-                        self._futile_video_runs,
-                    )
-                    # Same teardown the SDES abandon does. Leaving the
-                    # keepalive marked active and the go2rtc stream
-                    # registered points a viewer at a serve port with
-                    # nothing listening - "connection refused" instead
-                    # of a clean miss - and stops the integration's
-                    # stale-stream watchdog, which keys on the
-                    # keepalive having ended.
-                    await self._go_dormant(release_url=False, why="video abandon")
-                    return _PhaseReturn(None)
+                # A verdict, not a presumption (see prepare_session). The
+                # session is failed at its end (_session_end_wait) unless an
+                # earlier cycle saw video: the camera answered this way on
+                # every open measured 2026-08-17, so it must not reopen on the
+                # bare gate. It does not also escalate the open-failure pacer
+                # (it did until 2026-11-04): that paced it twice.
+                ps._session_video_known = True
                 break
             if ps.idle_release:
                 break
@@ -2177,10 +2075,8 @@ async def _dtls_serve_loop_serve_cycle(
             # is_alive() guards the never-started case: if Thread.start()
             # itself raised, join() raises "cannot join thread before it
             # is started", which would replace the real exception AND skip
-            # the ffmpeg terminate plus session stop below - orphaning the
-            # process on its serve port and leaking the camera's session.
+            # the session stop below, leaking the camera's session.
             ps.mux_thread.join(timeout=2.0)
-        _terminate_proc(ps.proc)  # never orphan ffmpeg on teardown
         self._stream_session = None
         try:
             await ps.session.stop()
@@ -2205,17 +2101,17 @@ async def _dtls_serve_loop_session_end(
 
     Runs once per session, after it has been stopped - never per serve cycle,
     which would sleep with a live session held. An idle release returns from
-    the loop before this, so it is never paced. A short session (see
-    _session_end_pacing) waits 30-45 s here before the loop reopens.
+    the loop before this, so it is never paced. A failed session (see
+    _session_end_wait) waits 30-45 s here before the loop reopens, and after
+    AIDOT_DTLS_FUTILE_VIDEO_LIMIT of them in a row the serve goes dormant.
 
     No idle check after the wait, by decision (2026-11-04 review): it released
     watched cameras whenever the idle window was shorter than the wait (the
     integration's 15 s battery window) or the viewer state was unknown (the
-    pipe cannot move during a wait). The trade-off: a camera nobody watches
-    whose sessions keep dying fast is reopened, each time after a 30-45 s wait
-    plus its session time, for as long as its keepalive runs. Nothing here
-    bounds that: the caller stops the keepalive (its viewer policy, or the
-    entity being unloaded).
+    pipe cannot move during a wait). What bounds a camera nobody watches whose
+    sessions keep dying fast is the failure limit above; with it set to 0,
+    nothing here does, and the caller stops the keepalive (its viewer policy,
+    or the entity being unloaded).
     """
     # The session's end, one rule: the earlier of when its last serve cycle
     # stopped serving and when its PC went bad (not when the disconnect
@@ -2224,44 +2120,69 @@ async def _dtls_serve_loop_session_end(
     if ps._pc_bad_box[0] is not None:
         _end = min(_end, ps._pc_bad_box[0])
     _lived = _end - ps._session_opened_at
+    _no_video = ps._session_video_known and not ps._session_video_seen
     _threshold = settings.read("AIDOT_DTLS_SHORT_SESSION_S")
     # Read here, once, after the session has been stopped, so every way a
     # serve cycle can end is covered (see _camera_closed_session).
     _camera_close = (
-        _lived < _threshold
-        and ps._session_had_video is True
-        and _camera_closed_session(ps.pc)
+        _lived < _threshold and ps._session_video_seen and _camera_closed_session(ps.pc)
     )
     ps._camera_close_run = ps._camera_close_run + 1 if _camera_close else 0
-    _wait = _session_end_pacing(
-        ps._short_pacer,
+    if _camera_close:
+        ps._session_end_reason = "camera closed the session; " + str(
+            ps._session_end_reason
+        )
+    _wait = _session_end_wait(
+        ps._session_pacer,
         _lived,
-        # None: no canary and no no-video verdict (see prepare_session).
-        had_video=ps._session_had_video is not False,
+        no_video=_no_video,
         threshold_s=_threshold,
+        limit=_futile_video_limit(),
         camera_closed=_camera_close and ps._camera_close_run <= _CAMERA_CLOSE_RUN_MAX,
     )
-    if _camera_close and not _wait and self._streaming_active:
-        _LOGGER.info(
-            "DTLS serve: camera %s closed its session after %.0fs - reopening"
-            " (%d in a row)",
-            self.device_id,
-            _lived,
-            ps._camera_close_run,
-        )
-    if not (_wait and self._streaming_active):
+    if not self._streaming_active:
         return None
-    # The first short session in a row, then every _SHORT_SESSION_LOG_EVERY-th,
-    # at INFO; the rest at DEBUG, so a camera doing this for hours does not
-    # drip a line a minute.
-    _n = ps._short_pacer.attempt
-    _info = _n == 1 or (_n - 1) % _SHORT_SESSION_LOG_EVERY == 0
-    _log = _LOGGER.info if _info else _LOGGER.debug
-    _log(
-        "DTLS serve: session for %s ended after %.0fs - waiting"
-        " %.0fs before reopening (%d short in a row)",
+    _n = ps._session_pacer.attempt
+    if _wait is None:
+        _LOGGER.warning(
+            "camera %s: %d DTLS sessions in a row ended within %.0fs or "
+            "delivered no video (the last: %.0fs, %s, %s) - stopping the "
+            "background serve. Re-opening keeps the camera busy without "
+            "fixing that. A live view will still open a session; set "
+            "AIDOT_DTLS_FUTILE_VIDEO_LIMIT=0 to keep retrying.",
+            self.device_id,
+            _n,
+            settings.read("AIDOT_DTLS_SHORT_SESSION_S"),
+            _lived,
+            "no video" if _no_video else "with video",
+            ps._session_end_reason,
+        )
+        # Same teardown the SDES abandon does. Leaving the keepalive marked
+        # active and the go2rtc stream registered points a viewer at a serve
+        # port with nothing listening - "connection refused" instead of a
+        # clean miss - and stops the integration's stale-stream watchdog,
+        # which keys on the keepalive having ended.
+        await self._go_dormant(release_url=False, why="session abandon")
+        return _PhaseReturn(None)
+    if not _wait:
+        if _camera_close:
+            _LOGGER.info(
+                "DTLS serve: camera %s closed its session after %.0fs (%s)"
+                " - reopening (%d in a row)",
+                self.device_id,
+                _lived,
+                ps._session_end_reason,
+                ps._camera_close_run,
+            )
+        return None
+    _LOGGER.log(
+        _repeat_log_level(_n - 1, every=_PACER_LOG_EVERY),
+        "DTLS serve: session for %s ended after %.0fs%s (%s) - waiting"
+        " %.0fs before reopening (%d failed in a row)",
         self.device_id,
         _lived,
+        " with no video" if _no_video else "",
+        ps._session_end_reason,
         _wait,
         _n,
     )
@@ -2281,7 +2202,7 @@ async def _dtls_serve_loop_session_end(
     try:
         # Chunked, so it ends as soon as streaming stops. Not the offline-aware
         # pause: offline handling belongs to the open path, which has it.
-        await self._slow_probe_sleep(_wait)
+        await self._chunked_wait(_wait)
     except asyncio.CancelledError:
         return _PhaseReturn(None)
     return None
@@ -2917,6 +2838,14 @@ class CameraMixin(
         # Cold-start serve-port relay (holds the public port connectable through
         # the handshake so an eager go2rtc pull waits instead of being refused).
         self._serve_relay: "Optional[_ServeRelay]" = None
+        self._ts_serve: "Optional[TsServer]" = None
+        # The DTLS serve loop's failed-session pacer (_session_end_wait). On
+        # the device, not the serve: the failure count survives a dormant
+        # serve that a live view restarts, so a camera still failing goes
+        # dormant again after one more failed session, not five.
+        self._dtls_session_pacer = ReconnectPacer(
+            _SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S
+        )
         # Cold-start instrumentation: monotonic at the start of an open, so any
         # thread (signaling, bridge, serve) can log elapsed-ms phase markers.
         self._cold_open_t0: "Optional[float]" = None
@@ -2954,12 +2883,10 @@ class CameraMixin(
     # data-channel-less; it's parked on the SDES/TUTK side anyway.
     _NO_DATACHANNEL_MODELS: frozenset = frozenset({"LK.IPC.A001064"})
 
-    # A001064's role-reversal handshake (the camera echoes our offer back as its
-    # own webrtcReq before doing ICE, and won't stream until it gets our
-    # webrtcResp) needs the camera armed BEFORE our webrtcReq.  sdes_fast_liveplay
+    # A001064 needs the camera armed BEFORE our webrtcReq.  sdes_fast_liveplay
     # sends webrtcReq ~4.5 s earlier, which degrades A001064 media reliability
     # (2/2 -> 1/2 media in a live A/B; the flag was soak-validated only on the
-    # A001513 battery cameras).  Exclude role-reversal models from the flag.
+    # A001513 battery cameras), so these models keep the full livePlay waits.
     _NO_FAST_LIVEPLAY_MODELS: frozenset = frozenset({"LK.IPC.A001064"})
 
     # Models confirmed (2026-05-02) to send TUTK-framed data instead of standard
@@ -2967,8 +2894,8 @@ class CameraMixin(
     # packets with a TUTK SFrame header (0xC8 audio / 0xC9 video) and an SSRC
     # that differs from the one advertised in the SDP.  For these the ffmpeg SDP
     # uses plain RTP/AVP (no SRTP decryption attempt) and the bridge strips the
-    # TUTK header before forwarding.  Matched by SUBSTRING (see _use_plain_rtp in
-    # sdes_open) so a revision suffix is covered.
+    # TUTK header before forwarding.  Matched by SUBSTRING so a revision suffix
+    # is covered; the SDES open refuses any other SDES model.
     _PLAIN_RTP_MODELS: frozenset = frozenset({"A001064", "A001513"})
 
     @property
@@ -3150,6 +3077,16 @@ class CameraMixin(
             self._cloud_online_explicit = True
         return self.status
 
+    @property
+    def cloud_reports_offline(self) -> bool:
+        """True only when the cloud has explicitly reported this camera offline.
+
+        Not the same as ``not status.online``: that reads False before the
+        cloud has said anything, and only an explicit report means the camera
+        is gone. The serve loops' offline pause, the open-failure log level
+        and the reboot guard ask this same question."""
+        return _cloud_reports_offline(self)
+
     def _open_fail_logger(self):
         """Pick the log level for a stream-open failure in the serve/keepalive
         loops: WARNING for a genuine failure, but DEBUG when the cloud has
@@ -3159,15 +3096,14 @@ class CameraMixin(
         """
         return _LOGGER.debug if _cloud_reports_offline(self) else _LOGGER.warning
 
-    async def _backoff_or_offline_pause(
-        self, delay: float, *, min_s: float = 0.0
-    ) -> None:
+    async def _backoff_or_offline_pause(self, delay: float) -> None:
         """Sleep a reconnect backoff, extended while the device is cloud-offline.
 
+        For the SDES and JPEG loops; the DTLS serve loop folds the offline case
+        into its own pacer (see _DTLS_RETRY_BASE_S).
+
         Normal case (device online, or the cloud never reported an online
-        flag): plain ``asyncio.sleep(delay)`` when there is no ``min_s``, as
-        before; with one, a chunked ``_slow_probe_sleep(max(delay, min_s))``
-        that ends as soon as streaming stops.
+        flag): plain ``asyncio.sleep(delay)``.
 
         When an open just failed AND the cloud has explicitly reported the
         device offline (``update_status_from_device`` saw ``online: false``),
@@ -3179,22 +3115,9 @@ class CameraMixin(
         slot every backoff cycle and starving live cameras' cold opens
         (observed live: two unpowered A000088s cycling 30 s open attempts
         pushed a healthy camera's cold open past two minutes).
-
-        ``min_s`` is a floor no path returns before, except a stop. Offline,
-        both ways out of the pause - the camera back online, or the probe
-        interval elapsed - wait out the rest of it (chunked, stop-aware).
-        The DTLS serve loop passes AIDOT_BUSY_RETRY_S after an ICE failure,
-        when the camera still holds the session it accepted and refuses a
-        sooner retry as busy (2026-11-04).
         """
         if not _cloud_reports_offline(self):
-            if min_s <= 0:
-                # Exactly as before for every caller without a floor (the SDES
-                # and JPEG loops among them, whose retry timing is pinned).
-                await asyncio.sleep(delay)
-            else:
-                # A floor can be long: chunked and stop-aware.
-                await self._slow_probe_sleep(max(delay, min_s))
+            await asyncio.sleep(delay)
             return
         _LOGGER.info(
             "keepalive[%s]: device is cloud-offline - pausing open retries "
@@ -3203,46 +3126,55 @@ class CameraMixin(
             _OFFLINE_RECHECK_S,
             _OFFLINE_PROBE_S,
         )
-        _t0 = time.monotonic()
-        while (_elapsed := time.monotonic() - _t0) < _OFFLINE_PROBE_S:
-            await asyncio.sleep(
-                min(_OFFLINE_RECHECK_S, max(0.1, _OFFLINE_PROBE_S - _elapsed))
+        await self._chunked_wait(
+            _OFFLINE_PROBE_S,
+            until=lambda: bool(self.status.online),
+            chunk_s=_OFFLINE_RECHECK_S,
+        )
+        if not getattr(self, "_streaming_active", False):
+            return
+        if self.status.online:
+            _LOGGER.info(
+                "keepalive[%s]: device back online - resuming opens",
+                self.device_id,
             )
-            if not getattr(self, "_streaming_active", False):
-                return
-            if self.status.online:
-                _LOGGER.info(
-                    "keepalive[%s]: device back online - resuming opens",
-                    self.device_id,
-                )
-                break
         else:
             _LOGGER.debug(
                 "keepalive[%s]: offline probe interval elapsed - probing one open",
                 self.device_id,
             )
-        # Both ways out - back online, or the probe interval elapsed (which
-        # AIDOT_OFFLINE_PROBE_S may set shorter than min_s) - honour min_s.
-        _rest = min_s - (time.monotonic() - _t0)
-        if _rest > 0:
-            await self._slow_probe_sleep(_rest)
 
-    async def _slow_probe_sleep(self, interval: float) -> None:
-        """Sleep `interval` seconds for the DTLS serve loop's slow-probe wait,
-        in `_SLOW_PROBE_SLEEP_CHUNK_S` increments rather than one blocking
-        `asyncio.sleep(interval)` call, re-checking `_streaming_active` each
-        increment.  `interval` can be several minutes; without chunking,
-        `stop()` would have to wait out the whole thing before the loop next
-        checks whether it should keep running.
+    async def _chunked_wait(
+        self,
+        interval: float,
+        *,
+        until: "Optional[Callable[[], bool]]" = None,
+        min_s: float = 0.0,
+        chunk_s: "Optional[float]" = None,
+    ) -> None:
+        """Sleep `interval` seconds for one of the loops' long waits, in
+        `chunk_s` (default `_WAIT_CHUNK_S`) increments rather than one
+        blocking `asyncio.sleep(interval)` call, re-checking
+        `_streaming_active` each increment.  `interval` can be ten minutes;
+        without chunking, `stop()` would have to wait out the whole thing
+        before the loop next checks whether it should keep running.
+
+        `until`, when given, ends the wait early once it returns true - but
+        never before `min_s` (a floor only a stop cuts short). The serve loop
+        passes the cloud's online flag for a camera it saw offline.
         """
+        _chunk = _WAIT_CHUNK_S if chunk_s is None else chunk_s
         _t0 = time.monotonic()
         while True:
             if not getattr(self, "_streaming_active", False):
                 return
-            _remaining = interval - (time.monotonic() - _t0)
+            _elapsed = time.monotonic() - _t0
+            _remaining = interval - _elapsed
             if _remaining <= 0:
                 return
-            await asyncio.sleep(min(_SLOW_PROBE_SLEEP_CHUNK_S, _remaining))
+            if until is not None and _elapsed >= min_s and until():
+                return
+            await asyncio.sleep(min(_chunk, _remaining))
 
     # -- Camera helpers ------------------------------------------------------ #
 
@@ -3536,10 +3468,23 @@ class CameraMixin(
                 ) as resp:
                     return await resp.json(content_type=None)
 
-        try:
+        async def _server_url_config():
             body = await _fetch()
             if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()  # retry once with the refreshed token
+            return body
+
+        # AIDOT_MQTT_CONFIG2: the broker that endpoint named with the password.
+        # getServerUrlConfig is still called, alongside, for its "ip" (the
+        # srflx candidate), and is the URL whenever that endpoint named none.
+        _cfg2_url, body = await asyncio.gather(
+            self._async_mqtt_config2_url(), _server_url_config(), return_exceptions=True
+        )
+        if isinstance(_cfg2_url, BaseException):
+            raise _cfg2_url
+        try:
+            if isinstance(body, BaseException):
+                raise body
 
             data = body.get("data") or {}
             _LOGGER.debug(
@@ -3548,7 +3493,7 @@ class CameraMixin(
                 data.get("ip"),
             )
 
-            mqtt_host = data.get("mqttServerUrl") or ""
+            mqtt_host = _cfg2_url or data.get("mqttServerUrl") or ""
             if not mqtt_host:
                 # Fall back to the regional MQTT broker URL known to work from
                 # the AiDot web client: wss://{region}-mqtt.arnoo.com:8443/mqtt
@@ -3562,35 +3507,10 @@ class CameraMixin(
                 )
                 mqtt_host = mqtt_fallback_url(self._region)
 
-            # The connection carries the account's MQTT password: refuse a
-            # non-TLS broker URL unless the operator opted in. Nothing is
-            # cached, so every caller sees None (and the open path raises
-            # AidotPlaintextMqttRefused from the scheme recorded here).
-            _plain = plaintext_mqtt_scheme(mqtt_host)
-            if _plain and not settings.read("AIDOT_ALLOW_PLAINTEXT_MQTT"):
-                # Every poll refetches (nothing is cached), so say it loudly
-                # once per change and quietly after that.
-                _level = (
-                    logging.DEBUG
-                    if self._mqtt_url_refused_scheme == _plain
-                    else logging.ERROR
-                )
-                self._mqtt_url_refused_scheme = _plain
-                _LOGGER.log(
-                    _level,
-                    "getServerUrlConfig named a non-TLS MQTT broker (%s://); "
-                    "refusing to send the MQTT password over it. Set "
-                    "AIDOT_ALLOW_PLAINTEXT_MQTT=1 to allow it.",
-                    _plain,
-                )
+            if not self._accept_mqtt_url(
+                mqtt_host, "mqttConfig2" if _cfg2_url else "getServerUrlConfig"
+            ):
                 return None
-            self._mqtt_url_refused_scheme = None
-
-            self._mqtt_url = (
-                mqtt_host
-                if mqtt_host.startswith(("wss://", "ws://"))
-                else f"wss://{mqtt_host}"
-            )
 
             # Capture mqttUser + mqttPassword from this same response if present.
             # iOS SDK binary strings confirm these fields cluster with mqttServerUrl.
@@ -3626,22 +3546,117 @@ class CameraMixin(
 
         except Exception as exc:
             _LOGGER.error("_async_get_mqtt_url failed: %r", exc)
+            if _cfg2_url:
+                return self._accept_mqtt_url(_cfg2_url, "mqttConfig2")
             return None
+
+    def _accept_mqtt_url(self, url: str, source: str) -> Optional[str]:
+        """Cache and return ``url`` as the broker URL, or None if it is refused.
+
+        The connection carries the account's MQTT password: a non-TLS broker
+        URL is refused unless the operator opted in. Nothing is cached then, so
+        every caller sees None (and the open path raises
+        AidotPlaintextMqttRefused from the scheme recorded here). A bare host
+        gets the one rule ``mqtt_config2.broker_url`` applies.
+        """
+        _plain = plaintext_mqtt_scheme(url)
+        if _plain and not settings.read("AIDOT_ALLOW_PLAINTEXT_MQTT"):
+            # Every poll refetches (nothing is cached), so say it loudly
+            # once per change and quietly after that.
+            _level = (
+                logging.DEBUG
+                if self._mqtt_url_refused_scheme == _plain
+                else logging.ERROR
+            )
+            self._mqtt_url_refused_scheme = _plain
+            _LOGGER.log(
+                _level,
+                "%s named a non-TLS MQTT broker (%s://); refusing to send the "
+                "MQTT password over it. Set AIDOT_ALLOW_PLAINTEXT_MQTT=1 to allow it.",
+                source,
+                _plain,
+            )
+            return None
+        self._mqtt_url_refused_scheme = None
+        self._mqtt_url = _mqtt_broker_url(url)
+        return self._mqtt_url
+
+    def _mqtt_credential_record(self) -> dict:
+        """The record of the fetch that issued the account's current MQTT
+        password (``LOGIN_INFO_MQTT_CREDENTIALS_KEY``), or {} when the password
+        is gone or came from elsewhere."""
+        rec = self._user_info.get(LOGIN_INFO_MQTT_CREDENTIALS_KEY)
+        pwd = self._shared_mqtt_password()
+        if isinstance(rec, dict) and pwd and rec.get("password") == pwd:
+            return rec
+        return {}
+
+    def _mqtt_client_id(self) -> Optional[str]:
+        """The clientId issued with the current password, else the account's
+        registered ``mqttClientId``, else None."""
+        return (
+            self._mqtt_credential_record().get("clientId")
+            or self._user_info.get("mqttClientId")
+            or None
+        )
+
+    async def _async_mqtt_config2_url(self) -> Optional[str]:
+        """The broker URL mqttConfig2 issued with the current password, or None.
+
+        None unless AIDOT_MQTT_CONFIG2 is on and the account's password came
+        from that endpoint (the host is recorded only alongside it). Fetches
+        the credential first when there is none, since the host arrives with it.
+        """
+        if not settings.read("AIDOT_MQTT_CONFIG2"):
+            return None
+        if self._shared_mqtt_password() is None:
+            await self._async_refresh_mqtt_credential()
+        rec = self._mqtt_credential_record()
+        host = rec.get("host")
+        if rec.get("source") != "mqttConfig2" or not isinstance(host, str) or not host:
+            return None
+        return _mqtt_broker_url(host)
 
     async def _mqtt_credentials(self) -> tuple:
         """``(mqttUser, mqttPassword, client id)`` for the account's broker.
 
         The user falls back to the account id and the password to empty when
-        the smarthome auth carries neither; the client id is the account's
-        registered ``mqttClientId``, else ``app-<user>``. Four MQTT sessions
+        the smarthome auth carries neither; the client id is
+        ``_mqtt_client_id()``, else ``app-<user>``. Four MQTT sessions
         (control commands, device actions, attribute reads and the shared
         persistent connection) built this the same way.
         """
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
         mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        client_id = self._mqtt_client_id() or f"app-{mqtt_user}"
         return mqtt_user, mqtt_pwd, client_id
+
+    async def _persistent_request(
+        self, publish_items: list, sub_topics: list, timeout: float
+    ) -> tuple:
+        """Publish ``publish_items`` and collect what arrives on ``sub_topics``
+        for ``timeout`` seconds, on the account's one persistent connection.
+
+        ``(messages, status)``, as ``_PersistentMqtt.request``. With no
+        connection to be had, ``([], {"error": _NO_PERSISTENT_MQTT})``: there
+        is no per-op fallback, because a second connect with the account's
+        clientId evicts the persistent one.
+        """
+        try:
+            pm = await self._get_persistent_mqtt()
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: persistent MQTT unavailable",
+                getattr(self, "device_id", "?"),
+                exc_info=True,
+            )
+            pm = None
+        if pm is None:
+            return [], {"error": _NO_PERSISTENT_MQTT}
+        return await pm.request(
+            publish_items=publish_items, subscribe_topics=sub_topics, timeout=timeout
+        )
 
     async def _async_get_smarthome_auth(self) -> Optional[dict]:
         """Fetch MQTT credentials (mqttUser + mqttPassword) for the Arnoo broker.
@@ -4007,14 +4022,7 @@ class CameraMixin(
         """
         import json as _json
 
-        mqtt_user, mqtt_pwd, client_id = await self._mqtt_credentials()
         user_id = self.user_id
-
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.error("_mqtt_device_cmd: no MQTT URL for %s", self.device_id)
-            return False
-
         device_id = self.device_id
         sub_topics = [
             f"iot/v1/c/{user_id}/#",
@@ -4056,11 +4064,6 @@ class CameraMixin(
             _wake_items.append((_wake_topic, _wake_payload))
         publish_items.append((pub_topic, payload_str))
 
-        if self._resolve_persistent_mqtt():
-            pm = await self._get_persistent_mqtt()
-        else:
-            pm = None
-
         import time as _time
 
         _plan = _wake_plan(
@@ -4068,69 +4071,35 @@ class CameraMixin(
             now=_time.monotonic(),
             last_wake=getattr(self, "_last_wake_mono", None),
         )
+        _connected = True
         if _plan.wake and _wake_items:
             try:
-                if pm is not None:
-                    await pm.request(
-                        publish_items=_wake_items, subscribe_topics=[], timeout=2.0
-                    )
-                else:
-                    # The SAME registered client id, never a variant: the broker
-                    # allows one session per account, so a second id evicts the
-                    # live one. Safe because the wake session is awaited to
-                    # completion before the command session opens - they never
-                    # overlap.
-                    await _mqtt_session_with_status(
-                        mqtt_url,
-                        mqtt_user,
-                        mqtt_pwd,
-                        client_id,
-                        subscribe_topics=[],
-                        publish_items=_wake_items,
-                        duration=2.0,
-                    )
-                self._last_wake_mono = _time.monotonic()
+                _, _wst = await self._persistent_request(_wake_items, [], 2.0)
+                _connected = _wst.get("error") != _NO_PERSISTENT_MQTT
+                if _connected:
+                    self._last_wake_mono = _time.monotonic()
             except Exception:
                 # A failed wake must not stop the command: on a camera that is
                 # already up the command works without it.
                 _LOGGER.debug(
                     "camera %s: wake publish failed", device_id, exc_info=True
                 )
-            await asyncio.sleep(_plan.settle)
-        if pm is not None:
-            messages, _st = await pm.request(
-                publish_items=publish_items,
-                subscribe_topics=sub_topics,
-                timeout=timeout,
+            if _connected:
+                await asyncio.sleep(_plan.settle)
+        if _connected:
+            messages, _st = await self._persistent_request(
+                publish_items, sub_topics, timeout
             )
-            if _st and _st.get("error"):
-                # Persistent connection unavailable - fall back to a fresh per-op
-                # connect so the command isn't silently dropped (and isn't falsely
-                # reported as sent on the empty result the persistent path returns).
-                _LOGGER.debug(
-                    "_mqtt_device_cmd: persistent MQTT failed (%s); falling back "
-                    "to a per-op session for %s",
-                    _st.get("error"),
-                    device_id,
-                )
-                messages, _st = await _mqtt_session_with_status(
-                    mqtt_url,
-                    mqtt_user,
-                    mqtt_pwd,
-                    client_id,
-                    subscribe_topics=sub_topics,
-                    publish_items=publish_items,
-                    duration=timeout,
-                )
         else:
-            messages, _st = await _mqtt_session_with_status(
-                mqtt_url,
-                mqtt_user,
-                mqtt_pwd,
-                client_id,
-                subscribe_topics=sub_topics,
-                publish_items=publish_items,
-                duration=timeout,
+            messages, _st = [], {"error": _NO_PERSISTENT_MQTT}
+        if _st.get("error"):
+            # No per-op fallback: it connected with the same clientId, which
+            # evicts the persistent connection. The command is reported as not
+            # sent rather than falsely as sent on an empty result.
+            _LOGGER.debug(
+                "_mqtt_device_cmd: MQTT unavailable for %s (%s)",
+                device_id,
+                _st.get("error"),
             )
 
         # A fire-and-forget caller only needs to know the publish left the host.
@@ -4138,7 +4107,7 @@ class CameraMixin(
         # cannot: it returns False for a failed publish and for a camera that
         # rebooted before answering.
         if not expect_ack:
-            _published = not (_st and _st.get("error"))
+            _published = not _st.get("error")
             _LOGGER.info(
                 "_mqtt_device_cmd: published without waiting for an ack "
                 "(topic=%s published=%s)",
@@ -4349,12 +4318,6 @@ class CameraMixin(
 
         user_id = self.user_id
         device_id = self.device_id
-        mqtt_user, mqtt_pwd, client_id = await self._mqtt_credentials()
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.debug("async_query_device_action: no MQTT URL for %s", device_id)
-            return None
-
         _dev = self._camera_properties() or {}
         parent_id = (
             getattr(getattr(self, "info", None), "direct_id", None)
@@ -4382,44 +4345,20 @@ class CameraMixin(
         ]
         sub_topics = [f"iot/v1/c/{user_id}/#", f"iot/v1/cb/{user_id}/#"]
 
-        # Use the PERSISTENT connection when there is one, exactly as
-        # `_mqtt_device_cmd` does. Opening a fresh session here instead looked
-        # harmless and is not: it connects with the same `mqttClientId` the
-        # long-lived connection is already using, and a broker evicts the older
-        # session on a duplicate client id. Inside Home Assistant that means the
-        # query and the integration's own connection knock each other off, and
-        # the reply never arrives -- the request appears to work and simply
-        # returns nothing. It only "worked" when tested with the integration
-        # stopped, which is the one condition that hides the conflict.
-        messages = []
-        pm = (
-            await self._get_persistent_mqtt()
-            if self._resolve_persistent_mqtt()
-            else None
+        # The PERSISTENT connection only, exactly as `_mqtt_device_cmd`. A fresh
+        # session here connects with the same `mqttClientId` the long-lived
+        # connection is already using, and a broker evicts the older session
+        # on a duplicate client id: inside Home Assistant the query and the
+        # integration's own connection knock each other off and the reply
+        # never arrives.
+        messages, _st = await self._persistent_request(
+            publish_items, sub_topics, timeout
         )
-        if pm is not None:
-            messages, _st = await pm.request(
-                publish_items=publish_items,
-                subscribe_topics=sub_topics,
-                timeout=timeout,
-            )
-            if _st and _st.get("error"):
-                _LOGGER.debug(
-                    "async_query_device_action: persistent MQTT failed (%s); "
-                    "falling back for %s",
-                    _st.get("error"),
-                    device_id,
-                )
-                pm = None
-        if pm is None:
-            messages, _st = await _mqtt_session_with_status(
-                mqtt_url,
-                mqtt_user,
-                mqtt_pwd,
-                client_id,
-                subscribe_topics=sub_topics,
-                publish_items=publish_items,
-                duration=timeout,
+        if _st.get("error"):
+            _LOGGER.debug(
+                "async_query_device_action: MQTT failed for %s (%s)",
+                device_id,
+                _st.get("error"),
             )
         # Several devAction messages can be in flight on a shared connection,
         # and some carry no `out` at all (a bare acknowledgement). Taking the
@@ -4610,17 +4549,12 @@ class CameraMixin(
 
         The suffix was presumably there to avoid evicting whoever legitimately
         holds that id, since a duplicate connect displaces it. The answer to
-        that is the shared persistent connection, now preferred unconditionally
-        - same identity, no second connect. The one-off fallback uses the exact
-        id and declines outright while a stream is active, because losing
-        someone's video to read a settings dict is a bad trade.
+        that is the shared persistent connection, the only one used - same
+        identity, no second connect.
 
-        **Caveat worth knowing:** that guard only sees streams on *this*
-        client. Calling the fallback path from a second process while a Home
-        Assistant instance is connected will displace HA's MQTT session,
-        because there is one authorized client id per account and a duplicate
-        connect wins. In-process there is no issue - the persistent connection
-        is shared and no second connect happens.
+        **Caveat worth knowing:** there is one authorized client id per
+        account, so a second process (a script beside a running Home Assistant)
+        builds its own persistent connection and the two displace each other.
 
         Mirrors the official app flow (l.java + IpcServiceImpl.java):
           1. Subscribe iot/v1/c/{userId}/# and iot/v1/cb/{deviceId}/#
@@ -4649,28 +4583,12 @@ class CameraMixin(
                     exc_info=True,
                 )
 
-        mqtt_user, mqtt_pwd, _base_cid = await self._mqtt_credentials()
-        # The broker binds the credential to the EXACT registered mqttClientId.
-        # A suffixed connect is refused outright with CONNACK rc=4, "Bad user
-        # name or password" - so the "-cmd" id this used to build could never
-        # establish a session, subscribe to anything, or receive a reply.  It
-        # was not a subtly wrong id; it was no session at all.  (Measured
-        # 2026-08-14 with Home Assistant disabled so nothing competed: suffixed
-        # refused, exact accepted.)
-        #
-        # The suffix was presumably there to avoid evicting the connection that
-        # legitimately holds this id, since a duplicate connect displaces it.
-        # The right answer to that is the shared persistent connection below -
-        # same identity, no second connect - which is why it is now preferred
-        # unconditionally rather than only under AIDOT_PERSISTENT_MQTT.
-        client_id = _base_cid
+        # The broker binds the credential to the EXACT registered mqttClientId
+        # (a suffixed connect is refused with CONNACK rc=4, measured
+        # 2026-08-14), and a duplicate connect evicts whoever holds it - so the
+        # read rides the shared persistent connection below, never its own.
         user_id = self.user_id
         device_id = self.device_id
-
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.error("async_get_camera_attributes: no MQTT URL for %s", device_id)
-            return None
 
         sub_topics = [
             f"iot/v1/c/{user_id}/#",
@@ -4716,76 +4634,17 @@ class CameraMixin(
             )
             publish_items.append((_wake_topic, _wake_payload))
 
-        _sess_st = None  # transport status, when a per-op session ran
-        # Prefer the shared connection whatever the env var says: it already
-        # holds the only client id this broker accepts, so riding it avoids
-        # both the refused connect and the eviction the fallback risks.
-        try:
-            pm = await self._get_persistent_mqtt()
-        except Exception:
-            _LOGGER.debug(
-                "camera %s: persistent MQTT unavailable for attribute read",
-                getattr(self, "device_id", "?"),
-                exc_info=True,
-            )
-            pm = None
-        if pm is not None:
-            messages, _st = await pm.request(
-                publish_items=publish_items,
-                subscribe_topics=sub_topics,
-                timeout=timeout,
-            )
-            if _st and _st.get("error"):
-                # Persistent connection unavailable - fall back to a fresh per-op
-                # connect so a transient outage doesn't masquerade as "no attrs".
-                _LOGGER.debug(
-                    "async_get_camera_attributes: persistent MQTT failed (%s); "
-                    "falling back to a per-op session for %s",
-                    _st.get("error"),
-                    device_id,
-                )
-                if getattr(self, "_streaming_active", False):
-                    # The fallback connects with the id a live stream is using,
-                    # and a duplicate connect evicts it. Losing someone's video
-                    # to read a settings dict is a bad trade, so decline.
-                    _LOGGER.info(
-                        "async_get_camera_attributes: %s is streaming and the "
-                        "persistent connection is unavailable; declining rather "
-                        "than evicting the stream's MQTT session.",
-                        device_id,
-                    )
-                    return None
-                messages, _sess_st = await _mqtt_session_with_status(
-                    mqtt_url,
-                    mqtt_user,
-                    mqtt_pwd,
-                    client_id,
-                    subscribe_topics=sub_topics,
-                    publish_items=publish_items,
-                    duration=timeout,
-                )
-        else:
-            # Status-bearing on purpose. The plain wrapper returns messages and
-            # drops the transport status, so "the broker refused our connect"
-            # and "the camera stayed quiet" both arrive as an empty list. That
-            # ambiguity is what let a client id the broker rejects outright go
-            # unnoticed through three investigations.
-            messages, _sess_st = await _mqtt_session_with_status(
-                mqtt_url,
-                mqtt_user,
-                mqtt_pwd,
-                client_id,
-                subscribe_topics=sub_topics,
-                publish_items=publish_items,
-                duration=timeout,
-            )
-        if _sess_st and not _sess_st.get("connected"):
+        messages, _st = await self._persistent_request(
+            publish_items, sub_topics, timeout
+        )
+        if _st.get("error"):
+            # Said as a transport failure, so "the broker would not have us"
+            # and "the camera stayed quiet" do not both read as an empty push.
             _LOGGER.warning(
-                "async_get_camera_attributes: no MQTT session for %s (rc=%s %s) - "
+                "async_get_camera_attributes: no MQTT session for %s (%s) - "
                 "this is a transport failure, not the camera staying quiet.",
                 device_id,
-                _sess_st.get("rc"),
-                _sess_st.get("rc_str"),
+                _st["error"],
             )
 
         for topic, raw in messages:
@@ -5558,12 +5417,12 @@ class CameraMixin(
     async def _reap_stream_drain(self):
         """Stop and reap the persistent-MQTT stream drain task, if any.
 
-        The drain blocks an executor thread on ``outgoing_q.get`` until a ``None``
-        sentinel arrives. A normal stop pushes that sentinel from the
+        The drain awaits ``outgoing_q`` on the loop until a ``None`` sentinel
+        arrives. A normal stop pushes that sentinel from the
         WebRTCSession/SdesSession; but if no session took ownership (open
-        cancelled mid-handshake) or a new open replaced this one, we must push it
-        ourselves - cancelling the future alone cannot interrupt the blocked
-        thread, leaking it (and its handler on the shared connection) forever."""
+        cancelled mid-handshake) or a new open replaced this one, nothing would,
+        and the drain and its handler on the shared connection would stay
+        forever. So push the sentinel and cancel the drain here."""
         drain = getattr(self, "_stream_mqtt_drain", None)
         outq = getattr(self, "_stream_mqtt_outq", None)
         self._stream_mqtt_drain = None
@@ -5838,7 +5697,8 @@ class CameraMixin(
         serve port connectable through the WebRTC handshake so an eager go2rtc
         pull waits instead of getting connection-refused).  Overrides the
         ``AIDOT_SERVE_RELAY`` env var (default on); set False to serve ffmpeg
-        directly on the public port (the pre-0.7.18 behaviour).
+        directly on the public port (the pre-0.7.18 behaviour). SDES serves
+        only: a DTLS pull serve holds its port for the whole stream itself.
 
         ``go2rtc_url`` points at a go2rtc API base.  It does two things: register
         the local serve with go2rtc (exposing its low-latency pull URL), and let
@@ -5962,7 +5822,9 @@ class CameraMixin(
         """Prefer go2rtc: once the local serve is ready, register it with the
         configured go2rtc server and expose its low-latency pull URL via
         ``stream_rtsp_url``.  Best-effort - on any failure the direct serve URL
-        remains the fallback (ffmpeg / HA HLS).
+        remains the fallback (ffmpeg / HA HLS).  The write goes through
+        ``go2rtc.async_ensure_stream`` (via ``prefer_go2rtc``), the same locked
+        call the Home Assistant integration makes.
         """
         import aiohttp
         from .go2rtc import prefer_go2rtc
@@ -6034,12 +5896,12 @@ class CameraMixin(
         if not base:
             return
         import aiohttp
-        from .go2rtc import Go2rtcClient
+        from .go2rtc import Go2rtcClient, async_remove_stream
 
         name = self._go2rtc_stream_name()
         try:
             async with aiohttp.ClientSession() as _s2:
-                await Go2rtcClient(_s2, base).remove_stream(name)
+                await async_remove_stream(Go2rtcClient(_s2, base), name)
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
@@ -6394,10 +6256,9 @@ class CameraMixin(
         posting every 20 s with nothing behind it. This puts the camera in
         the same state the idle release does, so the next view starts afresh.
         """
-        if isinstance(exc, _FfmpegMissing):
+        if isinstance(exc, _ServeUnavailable):
             _LOGGER.error(
-                "camera %s: %s: %s - the camera is released until the next view;"
-                " install ffmpeg or enable the direct publish",
+                "camera %s: %s: %s - the camera is released until the next view",
                 self.device_id,
                 which,
                 exc,
@@ -6492,9 +6353,8 @@ class CameraMixin(
         # escalated the backoff (10s -> 300s) on a camera that would have been
         # ready seconds later; under a consumer that re-opens per view, that is the
         # difference between a slow first frame and a live view that never fills
-        # in.  Give it the same bounded fast burst the DTLS serve loop already has
-        # (_retry_policy), then fall back to the pacer so a persistently-cold
-        # camera is still not hammered.  Bounded to _PEERID_MAX_REUSE so the whole
+        # in.  Give it a bounded fast burst (_not_ready_retry_delay), then fall
+        # back to the pacer so a persistently-cold camera is still not hammered.  Bounded to _PEERID_MAX_REUSE so the whole
         # burst stays on ONE peerid: a fresh peerid registers another camera-side
         # session, which is what wedged the L2 in the first place (0.12.16).
         ps._not_ready_burst = 0
@@ -6846,10 +6706,10 @@ class CameraMixin(
         ``AIDOT_SDES_FAST_LIVEPLAY`` in {0,false,no,off} or per-camera
         ``_sdes_fast_liveplay_opt=False`` (the explicit opt always wins).
 
-        Role-reversal models (``_NO_FAST_LIVEPLAY_MODELS``, e.g. A001064) are ALWAYS
-        excluded regardless of the flag - their handshake needs the camera armed
-        before our webrtcReq, so the early webrtcReq degrades their media (a
-        correctness exclusion, not a default choice). Only consulted for SDES
+        ``_NO_FAST_LIVEPLAY_MODELS`` (e.g. A001064) are ALWAYS excluded
+        regardless of the flag - they need the camera armed before our
+        webrtcReq, so the early webrtcReq degrades their media (a correctness
+        exclusion, not a default choice). Only consulted for SDES
         cameras (the caller gates on is_sdes_camera)."""
         model = getattr(getattr(self, "info", None), "model_id", None)
         if model in self._NO_FAST_LIVEPLAY_MODELS:
@@ -7044,27 +6904,16 @@ class CameraMixin(
         # forcing the relay while skipping its allocation would offer nothing.
         return self._resolve_sdes_connection_mode() == "lan"
 
-    def _resolve_persistent_mqtt(self) -> bool:
-        """Whether commands, attribute fetches, AND stream-open signaling reuse ONE
-        account-level persistent MQTT connection (matching the app's
-        LDSBaseMqttServiceImpl) instead of connecting per op.
-
-        **Default ON** (2026-06-17): this is exactly how the official app behaves -
-        one persistent connection per login session - and a live soak showed it
-        cuts SDES NO_MEDIA from ~57% to ~19% (no regression). It is also safer
-        than connect-per-op, which can collide on the single authorized client_id.
-        Disable via ``AIDOT_PERSISTENT_MQTT`` in {0,false,no,off} or per-camera
-        ``_persistent_mqtt_opt=False`` (the explicit opt always wins)."""
-        opt = getattr(self, "_persistent_mqtt_opt", None)
-        if opt is not None:
-            return bool(opt)
-        return settings.read("AIDOT_PERSISTENT_MQTT")
-
     async def _get_persistent_mqtt(self):
         """Get-or-create the account-shared ``_PersistentMqtt`` (one per account,
         keyed on the shared ``login_info``).  The broker binds auth to the single
         authorized client_id, so there must be exactly one.  Returns None if it
-        can't be built (caller falls back to per-op ``_mqtt_session``)."""
+        can't be built; there is no per-op fallback, because a second connect
+        with that client_id evicts this one.
+
+        It is the only MQTT transport, as the app's LDSBaseMqttServiceImpl is.
+        ``AIDOT_PERSISTENT_MQTT`` used to switch it off and is now ignored."""
+        settings.warn_deprecated_once()
         # _user_info is the shared account dict (same object across the account's
         # DeviceClients, and the same object as AidotClient.login_info) - the right
         # place to cache one connection per account.
@@ -7180,16 +7029,16 @@ class CameraMixin(
     ) -> "tuple[float, bool]":
         """``(delay, is_fast_retry)`` for a wake-readiness retry.
 
-        Shares [[_retry_policy]] with the DTLS serve loop so both paths agree on
-        what "the camera is still warming up" is worth waiting.  Returns
+        The DTLS serve loop's quick retry (_not_ready_burst_delay) for the first
+        ``burst_max`` failures.  Returns
         ``(0.0, False)`` when the counter is 0 (not a wake-readiness failure) and
-        ``(_, False)`` once the burst is spent, in both cases handing the decision
-        back to the caller's normal pacer.
+        ``(15.0, False)`` once the burst is spent, in both cases handing the
+        decision back to the caller's normal pacer.
         """
         if burst <= 0:
             return (0.0, False)
-        delay, fast = _retry_policy("not_ready", burst, burst_max=burst_max)
-        return (delay, bool(fast))
+        delay = _not_ready_burst_delay(burst, burst_max)
+        return (delay, True) if delay is not None else (15.0, False)
 
     def _maybe_start_serve_relay(
         self, serve_url: Optional[str]
@@ -7227,6 +7076,34 @@ class CameraMixin(
         )
         return relay
 
+    def _start_ts_serve(self, serve_url: Optional[str]) -> "TsServer":
+        """Bind a DTLS camera's pull serve on the port its URL advertises.
+
+        Bound for the whole serve loop, from before the camera's handshake, so
+        an eager go2rtc pull connects and waits through it rather than being
+        refused. A port that cannot be bound is logged, and the first cycle's
+        ``open()`` tries again.
+        """
+        port = _serve_port(serve_url) or 0
+        srv = TsServer(port)
+        try:
+            srv.start()
+        except OSError as exc:
+            _LOGGER.warning(
+                "camera %s: serve port %s could not be bound (%s) - retrying when"
+                " the camera's session is up",
+                getattr(self, "device_id", "?"),
+                port,
+                exc,
+            )
+            return srv
+        _LOGGER.debug(
+            "camera %s: holding serve port :%s",
+            getattr(self, "device_id", "?"),
+            srv.port,
+        )
+        return srv
+
     async def _dtls_serve_loop(self) -> None:
         """Acquire a concurrent-stream slot, then run the serve loop.
 
@@ -7242,12 +7119,13 @@ class CameraMixin(
             )
         await slots.acquire()
         try:
-            # Inside the try on purpose: _maybe_start_serve_relay catches OSError
-            # but Thread.start() raises RuntimeError when the host is out of
+            # Inside the try on purpose: _start_ts_serve catches OSError but
+            # Thread.start() raises RuntimeError when the host is out of
             # threads, and escaping here would skip slots.release() and burn a
             # permit for the life of the process - the cap would silently shrink
             # until nothing could stream at all.
-            self._serve_relay = self._maybe_start_serve_relay(self._keepalive_rtsp_url)
+            if _dtls_serve_mode(self._keepalive_rtsp_url) == "pull":
+                self._ts_serve = self._start_ts_serve(self._keepalive_rtsp_url)
             try:
                 await self._dtls_serve_loop_inner()
             except asyncio.CancelledError:
@@ -7255,48 +7133,50 @@ class CameraMixin(
             except Exception as exc:
                 await self._release_after_loop_error("DTLS serve", exc)
         finally:
-            _relay = self._serve_relay
-            self._serve_relay = None
-            if _relay is not None:
-                _relay.close()
+            _srv = self._ts_serve
+            self._ts_serve = None
+            if _srv is not None:
+                _srv.close()
             slots.release()
 
     async def _dtls_serve_loop_inner(self) -> None:
-        """Serve a DTLS camera's live H.264 to go2rtc over an HTTP-listen socket.
+        """Serve a DTLS camera's live H.264 and audio to go2rtc.
 
         Powered (A000088) cameras have no local API and aiortc owns the
         DTLS/SRTP keys, so we can't point ffmpeg at the socket like the SDES
         path.  Instead aiortc does ICE/DTLS/SRTP-decrypt/depacketize and we tap
-        the *encoded* H.264 frames and ``-c copy`` them to ``ffmpeg -f mpegts
-        -listen 1`` - no decode, no re-encode (viable on a Raspberry Pi).  The
-        WebRTC session is held warm; only the local ffmpeg serve is restarted
-        when go2rtc disconnects/reconnects, so reconnects need no camera
-        re-handshake.
+        the *encoded* H.264 frames: published over RTSP, or muxed to MPEG-TS
+        for a pull or stdout serve (see ``_dtls_serve_mode``) - no decode, no
+        re-encode (viable on a Raspberry Pi).  The WebRTC session is held warm;
+        only the local serve is restarted when go2rtc disconnects/reconnects,
+        so reconnects need no camera re-handshake.
         """
 
         ps = _DtlsServeLoopState()
         ps.serve_url = self._keepalive_rtsp_url
         # The official app gates its one automatic rebuild at 15 s
         # (autoRetryConnectTimeOutMs, KVSWebRTCChannel.smali:862-864) and never
-        # hammers; we borrow that 15 s as our floor.  We previously floored at 5 s and a partial-success ->
-        # reset path could drop the effective spacing even lower, pounding a flaky
-        # A000088 camera fast enough to wedge its DTLS stack (ICE completes but DTLS
-        # never fires until a power-cycle).  Floor the backoff at the 15 s gate and,
-        # independently, enforce a hard minimum wall-clock spacing between OPEN
-        # attempts so no code path (reset bug, fast PC-death) can pound the camera.
-        _MIN_DELAY, _MAX_DELAY = 15.0, 300.0
+        # hammers; we borrow that 15 s as our floor. Opening a flaky A000088
+        # faster than that can wedge its DTLS stack (ICE completes but DTLS
+        # never fires until a power-cycle). The backoff floors at the 15 s
+        # gate and, independently, OPEN attempts keep a hard minimum
+        # wall-clock spacing so no code path (fast PC-death) can pound the
+        # camera. The cap is 600 s (see _DTLS_RETRY_BASE_S).
         ps._open_gate = settings.read("AIDOT_DTLS_RETRY_GATE_S")
-        # Jittered-backoff pacer for failed opens. Unlike the SDES/JPEG loops this
-        # serve loop resets on any successful open (it has the _open_gate spacing
-        # below) rather than escalating on no-media - hence reset() not
-        # session_end_delay(). Sessions that connect and then end short are
-        # paced separately, on their own pacer (_session_end_pacing).
-        ps._pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
-        ps._short_pacer = ReconnectPacer(_SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S)
+        # Two pacers, one per outcome. Failed opens: reset on any successful
+        # open (the _open_gate spacing below guards a fast death) rather than
+        # escalating on no-media - hence reset() not session_end_delay().
+        # Sessions that connect and then fail: their own pacer, which also
+        # decides when to stop reopening (_session_end_wait).
+        ps._pacer = ReconnectPacer(
+            _DTLS_RETRY_BASE_S, _DTLS_RETRY_CAP_S, floor_frac=0.9
+        )
+        ps._session_pacer = self._dtls_session_pacer
         ps._camera_close_run = 0
         ps._last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
-        ps._not_ready_burst = 0  # consecutive DC-only (encoder-cold) declines
+        ps._not_ready_burst = 0  # not-ready answers in a row (encoder cold)
         ps.loop = asyncio.get_running_loop()
+        settings.warn_deprecated_once()
         while self._streaming_active:
             # Thread-safe queues: taps run on the loop, the A/V mux in a thread.
             _o = await _dtls_serve_loop_open_attempt(self, ps)
@@ -7307,9 +7187,6 @@ class CameraMixin(
             if isinstance(_o, _LoopContinue):
                 continue
 
-            # Resetting the pacer's attempt count also clears slow-probe state:
-            # it derives purely from _pacer.attempt, so _in_slow_probe reads
-            # false again on the very next failure sequence.
             await _dtls_serve_loop_prepare_session(self, ps)
             _o = await _dtls_serve_loop_serve_cycle(self, ps)
             if isinstance(_o, _PhaseReturn):
@@ -7330,91 +7207,6 @@ class CameraMixin(
             if isinstance(_o, _PhaseReturn):
                 return _o.value
         return None
-
-    async def _spawn_dtls_serve_ffmpeg(self, serve_url: Optional[str], stdin_fd: int):
-        """Launch ffmpeg to serve the mux thread's MPEG-TS (read from ``stdin_fd``).
-
-        The stream is already cleanly timestamped + AAC-muxed (with the
-        gain/limiter applied) by PyAV, so ffmpeg just copies and serves -
-        re-encoding here dropped the live audio (mpegts PMT-timing on the
-        real-time pipe).  Returns the process, or None.
-
-        Three destinations:
-
-        - ``serve_url == "-"`` -> STDOUT model: write MPEG-TS to this process's
-          own stdout (``pipe:1``), so a parent that spawned us - go2rtc's
-          ``exec:`` source - consumes the camera directly and owns the process
-          lifecycle (spawn on first viewer, kill on idle).  No listen port and
-          no cold-start relay, which is the DTLS analogue of the SDES
-          ``{output}`` RTSP push.  Logging already goes to stderr, so stdout
-          carries nothing but media.
-        - ``rtsp://`` -> PUSH model: publish to an RTSP server the caller
-          already runs, the same shape the SDES path has always had.  This is
-          not a protocol difference finally overcome - the media reaching this
-          point is identical whichever transport decrypted it, and the only
-          reason DTLS had no push was that nobody wired the destination.  TCP
-          interleave, because a UDP publish of a 720p keyframe fragments and
-          the first loss takes the GOP with it.
-        - anything else -> HTTP-listen model, unchanged: serve on a ``-listen``
-          socket that go2rtc pulls.
-        """
-        if not serve_url:
-            return None
-        if _ffmpeg_path() is None:
-            _LOGGER.error("DTLS serve: %s", _FFMPEG_MISSING_MSG)
-            return None
-        codec_args = ["-c", "copy"]
-        if serve_url == "-":
-            out_args = ["-f", "mpegts", "pipe:1"]
-            out_target = 1  # this process's real stdout
-        elif serve_url.startswith("rtsp"):
-            # Audio cannot be copied here, and that is not a preference.  The
-            # mux upstream writes AAC into MPEG-TS, which carries it as ADTS
-            # with no global headers; ffmpeg's RTSP muxer refuses that outright
-            # - "AAC with no global headers is currently not supported" at
-            # header-write, so the publish never starts and video dies with it.
-            # `-bsf:a aac_adtstoasc` does not save it: the header is written
-            # before the filter has produced extradata.  So transcode to G.711
-            # A-law, which is RTP-native, costs almost nothing at 8 kHz mono,
-            # and was what the SDES push carried until that path moved to AAC
-            # (fMP4/MSE has no G.711 mapping, so browsers got silence there).
-            codec_args = ["-c:v", "copy", "-c:a", "pcm_alaw", "-ar", "8000", "-ac", "1"]
-            out_args = ["-f", "rtsp", "-rtsp_transport", "tcp", serve_url]
-            out_target = asyncio.subprocess.DEVNULL
-        else:
-            out_args = ["-f", "mpegts", "-listen", "1", serve_url]
-            out_target = asyncio.subprocess.DEVNULL
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "warning",
-            # Suppress input-side buffering: the PyAV mux already writes
-            # correctly-interleaved, timestamped MPEG-TS to the pipe every
-            # ~20ms.  Without +nobuffer ffmpeg's mpegts demuxer accumulates a
-            # read-ahead window (and the output mpegts muxer defaults to 700ms
-            # of A/V interleave delay) before flushing to go2rtc - exactly the
-            # bursty/choppy audio pattern.  Matches the SDES serve's approach.
-            "-fflags",
-            "+nobuffer",
-            "-i",
-            "pipe:0",
-            *codec_args,
-            *out_args,
-        ]
-        try:
-            return await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=stdin_fd,
-                stdout=out_target,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-        except FileNotFoundError:
-            _LOGGER.error("DTLS serve: ffmpeg not found")
-            return None
-        except Exception as exc:
-            _LOGGER.warning("DTLS serve: ffmpeg launch failed: %s", exc)
-            return None
 
     # -- PTZ physical pan/tilt (A001064) ----------------------------------- #
     # Uses IOCtrl cmd=4097 (IOTYPE_USER_IPCAM_PTZ_COMMAND) - NOT MQTT.
@@ -7691,17 +7483,3 @@ class CameraMixin(
                             exc_info=True,
                         )
                 raise
-
-    # ------------------------------------------------------------------ #
-    # SDES-SRTP streaming path (cameras with isDTLS == '0')
-    # ------------------------------------------------------------------ #
-
-    class _SdesNoAnswerError(Exception):
-        """Raised by _open_sdes_stream when no webrtcResp arrives and
-        DTLS fallback is permitted (isDTLS != '0').
-
-        Signals async_open_webrtc_stream to retry with the DTLS path for
-        cameras that report ``enableSdes: '1'`` but actually require DTLS.
-        Cameras with ``isDTLS: '0'`` are excluded from this path; they
-        instead continue with ffmpeg and collect the SRTP stream directly.
-        """

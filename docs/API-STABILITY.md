@@ -75,11 +75,14 @@ release still catches them.
 | `aidot_cameras.camera.sd_playback` | `decode_playcontrol_reply` and the `PlaycontrolReply` it returns (`command`, `result_channel`, `clip_seconds`, the clip's start time); the `PLAY_*` command numbers |
 | `aidot_cameras.camera.models` | `CameraDeviceInformation`, `CameraStatusData` |
 | `aidot_cameras.camera.lan_control` | LAN-direct control helpers |
-| `aidot_cameras.camera.go2rtc` | the go2rtc bridge helpers |
+| `aidot_cameras.camera.go2rtc` | the go2rtc bridge helpers: `Go2rtcClient`, `prefer_go2rtc`, `DEFAULT_BASE_URL`, `DEFAULT_RTSP_PORT`, and the one write path `async_ensure_stream(client, name, source=None, *, recreate=False)` / `async_remove_stream(client, name)` with `EnsureResult`, `EnsureOutcome` and `PLACEHOLDER_SOURCE` |
 | `aidot_cameras.exceptions` | every exception type |
 | `aidot_cameras.const` | `CONF_*`, `DEFAULT_COUNTRY_CODE`, `SUPPORTED_COUNTRY_CODES` |
 | `aidot_cameras.camera.constants` | published protocol constants (`TALK_PCM_*`) |
 | `aidot_cameras.camera.hwaccel.probe_decoder` | decoder capability probe |
+| `aidot_cameras.camera.hwaccel.probe_encoder(codec="h264")`, `cached_encoder(codec="h264")`, `EncoderPlan`, `SOFTWARE_ENCODER` | the hardware-encoder probe. `probe_encoder` returns an `EncoderPlan(input_args, output_args)` for an encoder proven by a test encode with those same arguments on this host: `input_args` go before `-i` (VAAPI's `-vaapi_device <render node>`), `output_args` after it (VAAPI's `-vf format=nv12,hwupload`, then `-c:v <name>`). `SOFTWARE_ENCODER`, both empty, means software and the caller names the encoder; `encoder` and `is_software` read the plan. VAAPI is preferred over QSV. `probe_encoder` blocks and caches its verdict on disk; `cached_encoder` never probes and answers `None` until a verdict is known |
+| `CameraDeviceInformation.firmware_version` | the firmware version the cloud reports for the camera (`firmwareVersion`, or `deviceInfo.firmwareVersion`), or `None` |
+| `CameraDeviceClient.cloud_reports_offline` | True only when the cloud has explicitly reported the camera offline; `status.online` alone is False before the cloud has said anything |
 | the `aidot-go2rtc` command (also `python -m aidot_cameras`) | its arguments (`<dev_id> <output_url>`, `--list`, `-v`) and the meaning of the output URL schemes it accepts. Its log output is not part of the promise |
 | the `AIDOT_*` environment variables in the README's tables | per-install tuning seams. The four `StreamSettings` covers are read after a client's own setting and before the default. The variables in `docs/ENVIRONMENT.md` are not part of this promise: each may go once the behaviour it tunes has settled, and the CHANGELOG says so when one does |
 
@@ -89,6 +92,15 @@ Assistant integration), which is why they are listed: they were commitments in
 practice before this document named them.
 `CameraLanClient` appears in the README as a user-facing concept and is covered
 by the `lan_control` row.
+
+`async_ensure_stream` promises three things. Every write it sends to one go2rtc
+server (by base URL, in one event loop) is serialised with every other write
+through the module, `Go2rtcClient.ensure_stream`/`remove_stream` included, and
+its own DELETE and PUT run with no other write in between; the stream-list
+check after a rejected PUT is a read and is not serialised. It never raises.
+Its `outcome` is `REGISTERED` (PUT accepted), `UNCHANGED` (PUT rejected,
+stream present: go2rtc still serves it from its old definition) or `FAILED`
+(stream absent); `ok` is true for the first two.
 
 Two of these carry a promise about what they DO NOT say, and callers depend on it:
 
@@ -147,3 +159,10 @@ a minor release; fixes ship in a patch release.
 
 Deprecations get at least one minor release of overlap with a runtime warning
 before the old name is removed in the next major.
+
+Deprecated now:
+
+| Name | Since | What happens |
+| --- | --- | --- |
+| `AIDOT_SDES_ECHO_WAIT_S`, `AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S`, `AIDOT_SDES_ANSWER_PROBE_GRACE_S`, `AIDOT_SDES_TRIGGER_GRACE_S` | [Unreleased] | accepted and ignored, with one warning per process when any is set; the SDES open has no `webrtcReq`-echo wait, and the three first-media rules are one timer, `AIDOT_SDES_NO_MEDIA_GRACE_S` (docs/ENVIRONMENT.md) |
+| `AIDOT_DTLS_SLOW_PROBE_THRESHOLD`, `AIDOT_DTLS_SLOW_PROBE_INTERVAL_S`, `AIDOT_DTLS_SLOW_PROBE_LOG_EVERY` | [Unreleased] | accepted and ignored, with one warning per process when any is set; the DTLS serve loop paces failed opens on one backoff, 15 s up to 600 s and 540-600 s at the cap (docs/ENVIRONMENT.md) |

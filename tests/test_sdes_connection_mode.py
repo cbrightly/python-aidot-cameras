@@ -270,7 +270,7 @@ def test_lan_mode_gates_every_turn_allocate_in_the_open():
         if isinstance(node, ast.Call)
         and any(name_of(a) == "_turn_allocate_udp" for a in node.args)
     ]
-    assert len(sites) >= 3, "expected the three allocate sites in the SDES open"
+    assert len(sites) >= 2, "expected the pre- and post-offer allocate sites"
     for call in sites:
         gated = any(
             "_skip_turn_prealloc" in names_in(i.test)

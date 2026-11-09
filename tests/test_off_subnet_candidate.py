@@ -61,12 +61,21 @@ class TestItOnlyWarnsWhenEveryCandidateIsUnreachable:
         warning fires only when the off-subnet list is every candidate."""
         import ast
 
-        from tests.ast_guards import calls_to, log_calls, sdes_open_family
+        from tests.ast_guards import (
+            calls_to,
+            function,
+            log_calls,
+            module_tree,
+            sdes_open_family,
+        )
 
+        helper = function(
+            module_tree("aidot_cameras.camera.sdes_open"),
+            "_warn_if_every_candidate_off_subnet",
+        )
         warns = [
             n
-            for fn in sdes_open_family()
-            for n in ast.walk(fn)
+            for n in ast.walk(helper)
             if isinstance(n, ast.If)
             and any(c.func.attr == "warning" for c in log_calls(n))
             and calls_to(n.test, "len")
@@ -78,4 +87,11 @@ class TestItOnlyWarnsWhenEveryCandidateIsUnreachable:
         compare = [v for v in test.values if isinstance(v, ast.Compare)]
         assert compare and isinstance(compare[0].ops[0], ast.Eq)
         sides = {ast.unparse(compare[0].left), ast.unparse(compare[0].comparators[0])}
-        assert "len(_off)" in sides and any("_cam_ice_cands" in s for s in sides)
+        assert sides == {"len(_off)", "len(cands)"}
+        # Reached for an answer in hand at setup and for one that lands later.
+        callers = [
+            c
+            for fn in sdes_open_family()
+            for c in calls_to(fn, "_warn_if_every_candidate_off_subnet")
+        ]
+        assert len(callers) >= 2

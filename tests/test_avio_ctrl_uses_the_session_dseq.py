@@ -75,10 +75,31 @@ def test_the_avio_control_frame_no_longer_uses_a_random_dseq():
     ]
     assert seqs, "the AVIO control frame must take its dSeq from _next_dseq"
     used = {t.id for n in seqs for t in n.targets if isinstance(t, ast.Name)}
-    header = calls_to(sender, "avio_header")
-    assert header and any(
-        isinstance(h.args[0], ast.Name) and h.args[0].id in used for h in header
+    # It hands that dSeq to the bridge's one SDES sender, which packs it in
+    # the header's dSeq slot.
+    sends = calls_to(sender, "_sdes_send_avio")
+    assert sends and any(
+        isinstance(h.args[0], ast.Name) and h.args[0].id in used for h in sends
     ), "and pack it in the header's dSeq slot"
+
+
+def test_every_sdes_avio_send_goes_through_one_sender():
+    """The heartbeat, the speaker (via the command channel) and the session
+    commands share the bridge's one SDES sender; the heartbeat alone keeps a
+    random seq, as the app's sendHeartbeat does."""
+    import ast
+
+    from tests.ast_guards import calls_to, function, module_tree
+
+    tree = module_tree("aidot_cameras.camera.sdes_open")
+    one = function(tree, "_sdes_send_avio")
+    assert calls_to(one, "avio_frame")
+    bridge = function(tree, "_bridge_fn")
+    sends = calls_to(bridge, "_sdes_send_avio")
+    heartbeat = [c for c in sends if "CMD_AVIO_CTRL_HEARTHEAT_REQ" in ast.unparse(c)]
+    assert heartbeat and all("randint" in ast.unparse(c.args[0]) for c in heartbeat)
+    # Nothing else in the bridge frames a control command by hand.
+    assert not calls_to(bridge, "avio_header")
 
 
 def test_the_header_layout_is_unchanged():

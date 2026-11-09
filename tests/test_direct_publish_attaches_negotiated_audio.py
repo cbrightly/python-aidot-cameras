@@ -46,68 +46,77 @@ def test_no_audio_section_or_unserved_codec_gives_none():
     assert audio_pt_from_answer_sdp(None) is None
 
 
-def test_the_open_uses_it_at_once_only_for_direct_publish_and_skips_the_grace():
-    """Direct publish takes the negotiated audio PT straight away and skips the
-    audio grace; the ffmpeg serve waits the grace for a packet on the wire and
-    falls back to the answer's PT only if none came (2026-11-06: a relay-only
-    A001513's audio trailed its video by 1.14 s and the session served silent)."""
-    from tests.ast_guards import calls_to, names_in, sdes_open_family
+def test_the_wait_rule_keeps_the_ffmpeg_serve_waiting():
+    """The ffmpeg serve maps one audio type and drops the other, so it always
+    waits the grace for a packet on the wire (2026-11-06: a relay-only
+    A001513's audio trailed its video by 1.14 s). The direct publisher skips
+    it only when the answer names a type to fall back on."""
+    from aidot_cameras.camera.sdes_open import _AUDIO_PT_GRACE_S, _audio_pt_wait_s
 
-    family = sdes_open_family()
-    assert any(
-        calls_to(n, "audio_pt_from_answer_sdp") for fn in family for n in ast.walk(fn)
-    ), "the open no longer reads the answer's audio PT"
+    assert _audio_pt_wait_s(direct_publish=False, answer_apt=8) == _AUDIO_PT_GRACE_S
+    assert _audio_pt_wait_s(direct_publish=False, answer_apt=None) == (
+        _AUDIO_PT_GRACE_S
+    )
+    assert _audio_pt_wait_s(direct_publish=True, answer_apt=None) == (_AUDIO_PT_GRACE_S)
+    assert _audio_pt_wait_s(direct_publish=True, answer_apt=0) == 0.0
+    assert _audio_pt_wait_s(direct_publish=True, answer_apt=8) == 0.0
 
-    def _assigns(node, name):
-        return any(
-            isinstance(s, ast.Assign)
-            and any(getattr(t, "id", None) == name for t in s.targets)
-            for s in ast.walk(node)
-        )
 
-    # Taken at once only under the direct-publish test.
-    at_once = [
+def test_recordings_snapshots_and_h265_keep_ffmpeg():
+    from aidot_cameras.camera.sdes_open import _should_direct_publish
+
+    url = "rtsp://127.0.0.1:8554/cam"
+    assert not _should_direct_publish(url, "/tmp/x.mp4", None)
+    assert not _should_direct_publish(url, None, 5.0)
+    assert not _should_direct_publish(url, None, None, 97)
+
+
+def test_the_open_decides_the_serve_before_the_audio_wait():
+    """The adopted answer's audio PT is kept, the open resolves the serve plan
+    (video PT included) BEFORE the audio wait, gates the wait on
+    _audio_pt_wait_s with that decision, and falls back to the answer's PT
+    after the wait."""
+    from tests.ast_guards import calls_to, function, module_tree, names_in
+
+    tree = module_tree("aidot_cameras.camera.sdes_open")
+    assert calls_to(function(tree, "_adopt_answer_sdp"), "audio_pt_from_answer_sdp"), (
+        "the open no longer reads the answer's audio PT"
+    )
+    impl = function(tree, "_open_sdes_stream_impl")
+    plan = function(impl, "_resolve_serve_plan")
+    (decide,) = [
         n
-        for fn in family
-        for n in ast.walk(fn)
-        if isinstance(n, ast.If)
-        and calls_to(n.test, "_should_direct_publish")
-        and _assigns(n, "_answer_apt")
+        for n in ast.walk(plan)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "attr", None) == "_direct_publish" for t in n.targets)
     ]
-    assert at_once, "direct publish no longer attaches the answer's audio PT"
+    # The decision includes the video PT, so an H.265 session takes the
+    # ffmpeg rule.
+    assert "_serve_video_pt" in names_in(decide.value)
+    resolves = [
+        c for c in calls_to(impl, "_resolve_serve_plan") if c.lineno > plan.end_lineno
+    ]
+    waits = calls_to(impl, "_audio_pt_wait_s")
+    assert len(waits) == 1
+    assert any(c.lineno < waits[0].lineno for c in resolves)
+    kw = {k.arg: k.value for k in waits[0].keywords}
+    assert getattr(kw.get("direct_publish"), "attr", None) == "_direct_publish"
 
-    graces = [
+    loops = [
         n
-        for fn in family
-        for n in ast.walk(fn)
+        for n in ast.walk(impl)
         if isinstance(n, ast.If)
-        and any(
-            isinstance(s, ast.Assign)
-            and any(getattr(t, "id", None) == "_apt_deadline" for t in s.targets)
-            for s in n.body
-        )
+        and "_apt_wait" in names_in(n.test)
+        and any(isinstance(s, ast.While) for s in n.body)
     ]
-    assert graces and all("_answer_apt" in names_in(g.test) for g in graces)
-    # ...and the grace ends in the fallback to the answer's PT, after the wait.
-    for g in graces:
-        kinds = [type(s).__name__ for s in g.body]
-        assert "While" in kinds, "the grace no longer waits for a packet"
-        after = g.body[kinds.index("While") + 1 :]
-        assert any(_assigns(s, "_answer_apt") for s in after), (
-            "the ffmpeg serve no longer falls back to the answer's audio PT"
-        )
-
-
-def test_key_restart_keeps_the_audio_narrowing():
-    """The SRTP key-change relaunch rebuilds the SDP; without the negotiated
-    PT the audio line is left unnarrowed and the publisher takes PCMU (first
-    listed) and drops every PCMA packet."""
-    from tests.ast_guards import calls_to, names_in, sdes_open_family
-
-    rebuilds = [
-        c for fn in sdes_open_family() for c in calls_to(fn, "_build_restart_sdp")
+    assert len(loops) == 1, "the audio wait is no longer gated on the rule"
+    fallback = [
+        n
+        for n in ast.walk(impl)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "_answer_apt" for t in n.targets)
+        and getattr(n.value, "id", None) == "_answer_pt"
     ]
-    assert rebuilds
-    for call in rebuilds:
-        audio = {k.arg: k.value for k in call.keywords}.get("first_audio_pt")
-        assert audio is not None and "_keep_a" in names_in(audio)
+    assert fallback and all(f.lineno > loops[0].lineno for f in fallback), (
+        "the serve no longer falls back to the answer's audio PT after the wait"
+    )

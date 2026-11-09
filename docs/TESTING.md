@@ -81,18 +81,22 @@ large margin over that window. Do not read that as licence to lower it: a
 *sleeping* battery L2 still runs past 107 s before failing, and this wait is
 what separates "slow to wake" from "broken". What the margin does mean is that a
 stuck SDES open can burn 75 s per attempt, which dominates the wall-clock of a
-failing fleet run. Several stuck shapes end early instead: a stale battery
-offer and a nominee that never answers (`_stale_offer_abandon_due`,
-`_no_answer_abandon_due`), and since 1.0.0rc45 a camera that answered and never
-probed or never acted on LIVING (`_no_probe_abandon_due`,
-`_trigger_unacked_abandon_due`, 20 s each, in `sdes_open.py`). A camera that
-never answers at all still runs the full window.
+failing fleet run. Two timers end stuck shapes early instead, in
+`sdes_open.py`: a stale battery offer, counted from the camera's first sighting
+(`_stale_offer_abandon_due`), and no media 20 s after the camera's answer
+(`_no_media_abandon_due`), which covers a nominee that never answers, a camera
+that never probed, and LIVING never acted on (`_no_media_shape` names which for
+the stall report). A camera that never answers at all still runs the full
+window.
 
-A companion constant, `_PRE_LAUNCH_ANSWER_WAIT_S` (8 s), bounds how long the
-open waits for the camera's `webrtcResp` before parsing it for the ICE
-credentials the nomination needs. It exists because giving that answer a single
-event-loop cycle - what the code did before - meant it was never actually there,
-and no SDES camera ever streamed.
+The open does not wait for the camera's `webrtcResp` before starting the
+bridge. An answer already in hand is applied before it starts; one that lands
+later is applied in the first-media wait (`_adopt_answer_sdp`), which nominates
+from it at once and hands its credentials to the bridge's 2.5 s nomination
+tick. Before the nomination ran from the wait, an answer missed at bridge start
+was never nominated and no SDES camera streamed; that is what the old 8 s
+`_PRE_LAUNCH_ANSWER_WAIT_S` covered, at the cost of unanswered binding requests
+while it ran.
 
 ## The live tier
 

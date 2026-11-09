@@ -32,8 +32,8 @@ declares a **range** rather than a pin - an exact pin on any other version would
 be unsatisfiable alongside core's.
 
 **These are independent axes, not a sequence of shapes.** 0.3.58 is the dict
-shape *plus* a back-reference, so `HAS_TYPED_ACCOUNT` stays `False` there and
-the back-reference has its own flag, `HAS_DEVICE_CLIENT_BACKREF`. Do not model
+shape *plus* a back-reference, so it is still the dict shape and the
+back-reference has its own flag, `HAS_DEVICE_CLIENT_BACKREF`. Do not model
 it as a third value of `UPSTREAM_SHAPE`: that would encode a version rather than
 a capability.
 
@@ -74,12 +74,11 @@ version with a known-good one.
 **Only the dict shape is supported, from 0.3.56.** The typed shape
 (0.3.54-0.3.55) was dropped on 2026-09-23 - see "The typed shape is no longer
 supported" below - and `pyproject.toml` requires `python-aidot>=0.3.56`. Its
-branches in `_upstream.py`, unreachable since then, have been removed. The
-flags that reported it (`HAS_TYPED_ACCOUNT`, `UPSTREAM_SHAPE`,
-`UserInformation`, `HAS_READ_DATA_SEAM`, `HAS_SHARED_DISCOVERY_MAP`,
-`DEVICE_STATE_IS_UPSTREAMS`) remain importable as fixed constants with their
-dict-shape values, because the Home Assistant integration and the tests import
-them.
+branches in `_upstream.py`, unreachable since then, have been removed, and so
+have the flags that reported it (`HAS_TYPED_ACCOUNT`, `UserInformation`,
+`HAS_READ_DATA_SEAM`, `HAS_SHARED_DISCOVERY_MAP`, `DEVICE_STATE_IS_UPSTREAMS`)
+and the `broadcast_protocol_args` adapter. `UPSTREAM_SHAPE` stays, fixed at
+`"dict"`, because the Home Assistant integration's diagnostics import it.
 
 Every difference that is still live within the range (today: the account
 back-reference) is resolved in `aidot_cameras/_upstream.py`, which detects it

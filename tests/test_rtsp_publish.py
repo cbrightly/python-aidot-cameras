@@ -997,8 +997,12 @@ def test_loopback_publisher_forwards_and_rewrites(go2rtc, monkeypatch):
         tx.sendto(
             rp.build_rtp(0, False, 2, 320, 0xBBBB, b"\xff" * 160), ("127.0.0.1", a_port)
         )
+        tx.sendto(
+            rp.build_rtp(111, False, 3, 480, 0xBBBB, b"\x00" * 40),
+            ("127.0.0.1", a_port),
+        )
         tx.sendto(b"\x80\xc8" + b"\0" * 26, ("127.0.0.1", v_port))  # RTCP SR
-        assert _wait(lambda: len(go2rtc.frames) == 3)
+        assert _wait(lambda: len(go2rtc.frames) == 4)
         by_ch = {}
         for ch, pkt in go2rtc.frames:
             by_ch.setdefault(ch, []).append(rp.parse_rtp(pkt))
@@ -1006,8 +1010,11 @@ def test_loopback_publisher_forwards_and_rewrites(go2rtc, monkeypatch):
         assert [p[4] for p in v] == [b"\x65key", b"frag"]
         assert v[0][3] == v[1][3]  # one frame, one timestamp
         assert v[1][1] is True and v[1][2] == (v[0][2] + 1) & 0xFFFF
-        assert [p[0] for p in by_ch[0]] == [8]  # PCMU on a PCMA track dropped
-        assert proc.publish_stats()["dropped_pt"] == 1
+        # PCMU on a PCMA track is converted (the wire type wins); a type that
+        # is not G.711 is still dropped.
+        assert [p[0] for p in by_ch[0]] == [8, 8]
+        assert proc.publish_stats()["law_converted"] == 1
+        assert _wait(lambda: proc.publish_stats()["dropped_pt"] == 1)
         ssrc = struct.unpack_from("!I", go2rtc.frames[0][1], 8)[0]
         assert ssrc != 0xAAAA  # our own SSRC, not the camera's
         tx.close()
@@ -1161,11 +1168,11 @@ def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
         assert _wait(lambda: sum(1 for ch, _ in go2rtc.frames if ch == 4) >= 20)
         # The camera's timestamps are contiguous (160 samples/packet, no gaps),
         # so a working feed() never asks the pacer to fill silence. Video also
-        # flows here, so tick() runs on every pass (see `_video_forwarded`):
+        # flows here, so tick() runs on every pass (see `video_moved`):
         # if the AAC packets above came from tick()'s idle-fill instead of
         # feed() actually consuming the A-law, this would be in the thousands
         # by now.
-        assert proc._aac.pacer.silence_samples == 0
+        assert proc._sink.aac.pacer.silence_samples == 0
         tx.close()
     finally:
         proc.terminate()
@@ -1231,18 +1238,18 @@ def test_loopback_publish_fills_aac_silence_only_while_video_flows(go2rtc, monke
                 ("127.0.0.1", a_port),
             )
             time.sleep(0.02)
-        assert _wait(lambda: proc._aac.frames > 0)
+        assert _wait(lambda: proc._sink.aac.frames > 0)
         # The camera goes quiet - no audio, no video. Silence is generated to
         # keep the track alive BESIDE video, so none is generated now.
         time.sleep(1.2)
-        assert proc._aac.pacer.silence_samples == 0
+        assert proc._sink.aac.pacer.silence_samples == 0
         for i in range(40):  # video resumes, audio does not: fill beside it
             tx.sendto(
                 rp.build_rtp(96, True, 1 + i, 1800 * i, 0xAAAA, b"\x41pic"),
                 ("127.0.0.1", v_port),
             )
             time.sleep(0.02)
-        assert _wait(lambda: proc._aac.pacer.silence_samples > 0)
+        assert _wait(lambda: proc._sink.aac.pacer.silence_samples > 0)
         tx.close()
     finally:
         proc.terminate()
@@ -1481,7 +1488,8 @@ def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch, capl
     ]
     assert len(ended) == 1
     assert f"AAC {res['aac_frames']} frames" in ended[0]
-    assert f"{res['aac_silence_samples']} samples silence-filled" in ended[0]
+    # The same summary the SDES publisher ends its line with (PublishSink).
+    assert "0 silence-filled / 0 trimmed / 0 re-anchors" in ended[0]
 
 
 def test_dtls_publish_feeds_queued_audio_before_the_idle_fill(go2rtc, monkeypatch):
@@ -1572,22 +1580,19 @@ def test_sdes_direct_publish_decision(monkeypatch):
 
     url = "rtsp://127.0.0.1:8554/aidot_x"
     monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, "0")
-    assert not _should_direct_publish(url, None, None, True)  # turned off
+    assert not _should_direct_publish(url, None, None)  # turned off
     monkeypatch.delenv(rp.ENV_DIRECT_PUBLISH, raising=False)
-    assert _should_direct_publish(url, None, None, True)  # the default
-    assert not _should_direct_publish("http://127.0.0.1:18600/x.ts", None, None, True)
-    assert not _should_direct_publish(None, None, None, True)  # decode drain
-    assert not _should_direct_publish(url, "/tmp/clip.ts", None, True)  # recording
-    assert not _should_direct_publish(url, None, 10, True)  # snapshot
-    # SRTP reaches the serve still encrypted (ffmpeg decrypts it from the
-    # SDP's a=crypto) for any model the bridge does not decrypt itself.
-    assert not _should_direct_publish(url, None, None, False)
+    assert _should_direct_publish(url, None, None)  # the default
+    assert not _should_direct_publish("http://127.0.0.1:18600/x.ts", None, None)
+    assert not _should_direct_publish(None, None, None)  # decode drain
+    assert not _should_direct_publish(url, "/tmp/clip.ts", None)  # recording
+    assert not _should_direct_publish(url, None, 10)  # snapshot
 
 
-def test_the_open_passes_the_plain_rtp_decision_through():
-    """The direct-publish decision the serve acts on is told whether the media
-    reaches it decrypted and which video codec was negotiated: a decision made
-    without them publishes SRTP ciphertext or an unvalidated codec."""
+def test_the_open_passes_the_negotiated_codec_through():
+    """The direct-publish decision the serve acts on is told which video codec
+    was negotiated: a decision made without it publishes an unvalidated
+    codec."""
     import ast
 
     from tests.ast_guards import calls_to, names_in, sdes_open_family
@@ -1597,19 +1602,20 @@ def test_the_open_passes_the_plain_rtp_decision_through():
         for fn in sdes_open_family()
         for n in ast.walk(fn)
         if isinstance(n, ast.Assign)
-        and any(getattr(t, "id", None) == "_direct_publish" for t in n.targets)
+        and any(getattr(t, "attr", None) == "_direct_publish" for t in n.targets)
         and calls_to(n.value, "_should_direct_publish")
     ]
     assert len(decisions) == 1, "the open's direct-publish decision moved"
     args = decisions[0].args
-    assert len(args) == 5
-    assert "_use_plain_rtp" in names_in(args[3]) and "_keep_v" in names_in(args[4])
+    assert len(args) == 4
+    assert "_serve_video_pt" in names_in(args[3])
 
 
-def test_both_sdes_serve_launches_go_through_the_spawn_helper():
-    """The first launch AND the SRTP key-change relaunch both use
-    ``_spawn_serve`` - a raw ``subprocess.Popen`` left at either site would
-    silently bring ffmpeg back with direct publish on - and the helper reads
+def test_the_sdes_serve_launch_goes_through_the_spawn_helper():
+    """The serve launches once, through ``_spawn_serve`` (the SRTP key-change
+    relaunch is gone: the bridge decrypts with a later key in place) - a raw
+    ``subprocess.Popen`` would silently bring ffmpeg back with direct publish
+    on - and the helper reads
     the SDP through the executor, never with a blocking open() on the loop."""
     import ast
 
@@ -1628,7 +1634,7 @@ def test_both_sdes_serve_launches_go_through_the_spawn_helper():
         for n in ast.walk(fn)
         if isinstance(n, ast.Await) and name_of(n.value) == "_spawn_serve"
     ]
-    assert len(launches) == 2
+    assert len(launches) == 1
     spawn = function(module_tree("aidot_cameras.camera.sdes_open"), "_spawn_serve")
     assert calls_to(spawn, "LoopbackRtpPublisher") and calls_to(spawn, "Popen")
     popens = [c for fn in family for c in calls_to(fn, "Popen")]
@@ -2001,9 +2007,9 @@ def test_loopback_publish_never_splits_a_frame_a_stray_packet_interrupts(
         now = time.monotonic()
         proc._send(pub, video_idx, (True, 1000, b"A1", now, ssrc))
         proc._send(pub, video_idx, (False, 7000, b"B1", now, ssrc))
-        proc._video_forwarded = False
+        proc._sink.video_moved = False
         proc._send(pub, video_idx, (False, 1000, b"Alate", now, ssrc))
-        assert proc._video_forwarded is False
+        assert proc._sink.video_moved is False
         proc._send(pub, video_idx, (True, 7000, b"B2", now, ssrc))
         assert _wait(lambda: len(go2rtc.frames) == 3)
         time.sleep(0.1)
@@ -2280,10 +2286,10 @@ def test_direct_publish_is_gated_to_the_validated_codec(monkeypatch):
 
     url = "rtsp://127.0.0.1:8554/aidot_x"
     monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, "1")
-    assert _should_direct_publish(url, None, None, True, 96)  # H.264
-    assert not _should_direct_publish(url, None, None, True, 97)  # H.265
+    assert _should_direct_publish(url, None, None, 96)  # H.264
+    assert not _should_direct_publish(url, None, None, 97)  # H.265
     # Codec not known yet (no narrowing): the caller decides later.
-    assert _should_direct_publish(url, None, None, True, None)
+    assert _should_direct_publish(url, None, None, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -2819,3 +2825,103 @@ def test_loopback_publisher_without_audio_builds_no_conditioner(go2rtc, monkeypa
     finally:
         proc.kill()
     assert proc.poll() == rp.EXIT_KILLED
+
+
+# -- PublishSink: what both publishers share ---------------------------------- #
+
+
+class _SinkPub:
+    def __init__(self, fail=False):
+        self.sent, self.fail = [], fail
+
+    def send_rtp(self, track, pkt):
+        if self.fail:
+            raise rp.RtspPublishError("send failed")
+        self.sent.append((track.channel, pkt))
+
+
+class _FakeAac:
+    ssrc = 0x1234
+
+    def __init__(self):
+        self.ticks, self.fed = [], []
+        self._ts = 0xFFFFFC00  # the AAC clock wraps on the second frame
+
+    def _out(self):
+        out = [(1, self._ts, b"\0\x10\0\x08" + b"au")]
+        self._ts = (self._ts + 1024) & 0xFFFFFFFF
+        return out
+
+    def feed(self, alaw, pcma_ts, now):
+        self.fed.append((alaw, pcma_ts, now))
+        return self._out()
+
+    def tick(self, now, video_media_s=None):
+        self.ticks.append(video_media_s)
+        return self._out()
+
+
+def _sink(**kw):
+    sess = _SpySession()
+    s = rp.PublishSink(
+        "cam",
+        ts_session=type("S", (), {"video": sess.video_, "aac": sess.aac_})(),
+        **kw,
+    )
+    aac = _FakeAac()
+    s.attach_aac(aac, rp.PublishTrack("audio", 97, 48000, "MPEG4-GENERIC", 2))
+    return s, aac, sess
+
+
+def test_publish_sink_video_clock_unwraps_the_published_timestamps():
+    s, _aac, _ = _sink()
+    assert s.video_published(0xFFFFF000) == 0
+    assert s.video_published(0x00000800) == 0x1800  # across the 32-bit wrap
+    assert s.video_published(0x00000800) == 0x1800  # same picture, no step
+
+
+def test_publish_sink_ticks_aac_only_after_video_moved():
+    s, aac, _ = _sink()
+    pub = _SinkPub()
+    s.tick_aac(pub)
+    assert aac.ticks == [], "no idle fill before any video"
+    s.video_published(1000)
+    s.video_published(1000 + 9000)
+    s.tick_aac(pub)
+    s.tick_aac(pub)
+    assert aac.ticks == [pytest.approx(0.1)], "one tick per video movement"
+    assert [ch for ch, _ in pub.sent] == [4]
+
+
+def test_publish_sink_feeds_the_tee_aac_on_its_own_clock():
+    s, aac, sess = _sink()
+    pub = _SinkPub()
+    s.feed_aac(pub, b"\xd5" * 160, 160, 1.0)
+    s.feed_aac(pub, b"\xd5" * 160, 320, 1.02)
+    assert aac.fed[0] == (b"\xd5" * 160, 160, 1.0)
+    # Raw frames minus the RFC 3640 AU header, counted from 0 across the wrap.
+    assert sess.aac == [(b"au", 0), (b"au", 1024)]
+    assert s.aac_seconds > 0
+
+
+def test_publish_sink_send_errors_are_left_to_the_loop():
+    s, _aac, sess = _sink()
+    s.feed_aac(_SinkPub(fail=True), b"\xd5" * 160, 160, 1.0)  # left to pub.alive
+    assert sess.aac == [], "a frame that did not go out is not teed"
+
+
+def test_publish_sink_without_aac_reports_zeros_and_no_summary():
+    s = rp.PublishSink("cam")
+    s.attach_aac(None, None)
+    s.video_published(0)
+    s.tick_aac(_SinkPub())
+    assert s.aac_stats() == dict.fromkeys(rp.AAC_STAT_KEYS, 0)
+    assert s.aac_summary() == ""
+
+
+def test_publish_sink_tee_never_costs_the_publish():
+    def _boom(*a):
+        raise RuntimeError("tee")
+
+    s = rp.PublishSink("cam", ts_session=type("S", (), {"video": _boom})())
+    s.tee_video(b"au", 0, True)  # swallowed

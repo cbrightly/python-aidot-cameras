@@ -11,11 +11,9 @@ Upstream has changed its private API inside patch releases more than once:
 
 The declared range starts at 0.3.56, so only shape A is installable and only
 shape A is supported.  Shape B (0.3.54-0.3.55) stopped being installable when
-the floor moved on 2026-09-23 and its branches have since been removed.  The
-names that used to report it (``HAS_TYPED_ACCOUNT``, ``UPSTREAM_SHAPE``,
-``UserInformation``, ``HAS_READ_DATA_SEAM``, ``HAS_SHARED_DISCOVERY_MAP``,
-``DEVICE_STATE_IS_UPSTREAMS``) are kept as fixed constants because consumers
-import them.  See ``docs/UPSTREAM.md``.
+the floor moved on 2026-09-23; its branches and the flags that reported it are
+gone, except ``UPSTREAM_SHAPE``, kept as a fixed constant because the Home
+Assistant integration's diagnostics import it.  See ``docs/UPSTREAM.md``.
 
 Two axes are still live within the range and are detected here:
 
@@ -50,35 +48,9 @@ from aidot.login_const import (
 )
 from aidot.models.device_model import DeviceInformation as DeviceRecord
 
-# --------------------------------------------------------------------------- #
-# Retired shape-B flags
-# --------------------------------------------------------------------------- #
-# Shape B (0.3.54-0.3.55) is no longer supported.  These keep their names and
-# their shape-A values because consumers and tests import them.
-
-#: Always False: the typed account layer (``user_info``, ``_cloud_api``,
-#: ``UserInformation``) existed only on shape B.
-HAS_TYPED_ACCOUNT = False
-
-#: Always ``"dict"``; ``"typed"`` was shape B.
+#: Always ``"dict"`` (shape A), the only shape in the supported range.  Kept
+#: because the integration's diagnostics report it.
 UPSTREAM_SHAPE = "dict"
-
-#: Always None: upstream's ``UserInformation`` class existed only on shape B.
-UserInformation = None
-
-#: Always False: upstream's own ``DeviceState`` existed only on shape B, so
-#: ``DeviceState`` below is always the local stand-in.
-DEVICE_STATE_IS_UPSTREAMS = False
-
-#: Always False: ``DeviceClient.read_data`` existed only on shape B.  Shape A
-#: inlines the decrypt into ``receive_data``, so there is no seam to hook.
-HAS_READ_DATA_SEAM = False
-
-#: Always False: the process-wide ``Discover.DISCOVERED_DEVICE`` class dict
-#: existed only on shape B.  Shape A keeps the map on the ``Discover``
-#: instance, which upstream's ``get_device_client`` reads straight off
-#: ``self._discover``.
-HAS_SHARED_DISCOVERY_MAP = False
 
 
 def rsa_encrypt(message: str, public_key: Any = None) -> str:
@@ -374,33 +346,18 @@ except ImportError:  # pragma: no cover - upstream is a hard dependency
     HAS_DEVICE_CLIENT_BACKREF = False
 
 
-def broadcast_protocol_args(callback: Any, user_id: str) -> tuple:
-    """Positional args for upstream's ``BroadcastProtocol.__init__``.
-
-    ``(callback, user_id)`` on every supported release; upstream uses the
-    account id to build the request payload.  (0.3.54-0.3.55 took
-    ``(callback)`` alone.)
-    """
-    return (callback, user_id)
-
-
 #: Names this module intends as its public surface within the package.
 __all__ = [
     "API_URL_TEMPLATE",
     "APP_ID",
     "DEFAULT_REGION",
-    "DEVICE_STATE_IS_UPSTREAMS",
     "HAS_DEVICE_CLIENT_BACKREF",
-    "HAS_READ_DATA_SEAM",
-    "HAS_SHARED_DISCOVERY_MAP",
-    "HAS_TYPED_ACCOUNT",
     "PUBLIC_KEY_PEM",
     "RECONNECT_HANDLE_ATTRS",
     "UPSTREAM_SHAPE",
     "DeviceModel",
     "DeviceRecord",
     "DeviceState",
-    "UserInformation",
     "account_record",
     "account_refresh_token",
     "account_region",
@@ -412,7 +369,6 @@ __all__ = [
     "api_get_houses",
     "api_get_products",
     "api_refresh_token",
-    "broadcast_protocol_args",
     "cancel_pending_reconnect",
     "device_client_args",
     "device_session_authenticated",

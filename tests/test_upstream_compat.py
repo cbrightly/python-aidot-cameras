@@ -53,8 +53,8 @@ backref_only = pytest.mark.skipif(
 def test_shape_detection_is_self_consistent():
     """Every capability flag must match the tree that is really importable.
 
-    The shape-B flags are fixed constants now; these assertions still hold and
-    fail if upstream ever brings the typed names back.
+    The shape-B flags are gone; the checks that the typed names are absent
+    upstream stay, and fail if upstream ever brings them back.
     """
     import importlib
 
@@ -64,14 +64,9 @@ def test_shape_detection_is_self_consistent():
         except ImportError:
             return False
 
-    assert _upstream.HAS_TYPED_ACCOUNT is importable(
-        "aidot.models.auth_model", "UserInformation"
-    )
-    assert _upstream.DEVICE_STATE_IS_UPSTREAMS is importable(
-        "aidot.device_client", "DeviceState"
-    )
+    assert not importable("aidot.models.auth_model", "UserInformation")
+    assert not importable("aidot.device_client", "DeviceState")
     assert _upstream.UPSTREAM_SHAPE == "dict"
-    assert _upstream.UserInformation is None
 
     # Derived independently of the detector: calling
     # _init_takes_account_client here would only compare the flag with itself.
@@ -326,10 +321,8 @@ def test_read_data_seam_flag_matches_reality():
     from aidot.device_client import DeviceClient
     from aidot_cameras.device_client import CameraDeviceClient
 
-    assert _upstream.HAS_READ_DATA_SEAM is callable(
-        getattr(DeviceClient, "read_data", None)
-    )
-    assert ("read_data" in CameraDeviceClient.__dict__) is _upstream.HAS_READ_DATA_SEAM
+    assert not callable(getattr(DeviceClient, "read_data", None))
+    assert "read_data" not in CameraDeviceClient.__dict__
 
 
 def test_device_client_requires_only_arguments_we_know_how_to_supply():
@@ -607,7 +600,6 @@ def test_broadcast_protocol_construction_matches_the_shape():
 
     params = list(inspect.signature(BroadcastProtocol.__init__).parameters)
     assert params[:3] == ["self", "callback", "user_id"], params
-    assert _upstream.broadcast_protocol_args(None, "u1") == (None, "u1")
 
     # Our subclass must build and expose what it overrides.
     protocol = InterfaceBroadcastProtocol(None, "u1", broadcast_addr="192.0.2.255")

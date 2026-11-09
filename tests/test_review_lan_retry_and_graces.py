@@ -136,14 +136,14 @@ def test_the_default_limit_still_marks_a_failing_light():
 @pytest.mark.parametrize("value", ["", "20s", "nan", "inf"])
 def test_a_bad_grace_value_neither_breaks_the_import_nor_fires_at_once(value):
     env = dict(os.environ)
-    env["AIDOT_SDES_TRIGGER_GRACE_S"] = value
-    env["AIDOT_SDES_ANSWER_PROBE_GRACE_S"] = value
+    env["AIDOT_SDES_NO_MEDIA_GRACE_S"] = value
+    env["AIDOT_BATTERY_STALE_OFFER_GRACE_S"] = value
     out = subprocess.run(
         [
             sys.executable,
             "-c",
             "import aidot_cameras.camera.sdes_open as s;"
-            "print(s._TRIGGER_GRACE_S, s._ANSWER_PROBE_GRACE_S)",
+            "print(s._NO_MEDIA_GRACE_S, s._BATTERY_STALE_OFFER_GRACE_S)",
         ],
         env=env,
         capture_output=True,
@@ -151,4 +151,4 @@ def test_a_bad_grace_value_neither_breaks_the_import_nor_fires_at_once(value):
         timeout=60,
     )
     assert out.returncode == 0, out.stderr[-500:]
-    assert out.stdout.split() == ["20.0", "20.0"]
+    assert out.stdout.split() == ["20.0", "15.0"]

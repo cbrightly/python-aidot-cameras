@@ -11,7 +11,13 @@ import struct
 
 from typing import Optional
 
-from .constants import _PTZ_DIR_CODES, _STREAM_QUALITY, SETSTREAMCTRL_CMD
+from .constants import (
+    _PTZ_DIR_CODES,
+    _STREAM_QUALITY,
+    IOTYPE_USER_IPCAM_PTZ_COMMAND,
+    IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ,
+    IOTYPE_USER_IPCAM_SETSTREAMCTRL_RESP,
+)
 from .models import _cloud_reports_offline
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,9 +40,7 @@ LIGHT_LINGER_DURATIONS = (20, 30, 40, 50)
 LIGHT_BRIGHTNESS_MIN = 10
 LIGHT_BRIGHTNESS_MAX = 100
 
-#: The camera's ack for SETSTREAMCTRL (800).
-SETSTREAMCTRL_RESP_CMD = 801
-#: Measured 0.01-0.03s; short so a control call never holds up a view.
+#: How long to wait for the camera's SETSTREAMCTRL ack. Measured 0.01-0.03s; short so a control call never holds up a view.
 _SETSTREAMCTRL_ACK_S = 1.5
 
 
@@ -486,7 +490,7 @@ class _CameraControlsMixin:
         if session is None:
             _LOGGER.warning("async_ptz_move: no active stream session")
             return False
-        ok = session._avio_cmd(4097, payload)
+        ok = session._avio_cmd(IOTYPE_USER_IPCAM_PTZ_COMMAND, payload)
         _LOGGER.debug(
             "PTZ %s (code=%d speed=%d preset=%d) -> %s",
             direction,
@@ -577,9 +581,9 @@ class _CameraControlsMixin:
         # quieter cameras. Reading the reply is what we could not do before; it
         # makes a refusal visible instead of indistinguishable from success.
         reply = await session.async_avio_request(
-            SETSTREAMCTRL_CMD,
+            IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ,
             payload,
-            response_cmd=SETSTREAMCTRL_RESP_CMD,
+            response_cmd=IOTYPE_USER_IPCAM_SETSTREAMCTRL_RESP,
             timeout=_SETSTREAMCTRL_ACK_S,
         )
         if reply is None:
@@ -614,7 +618,9 @@ class _CameraControlsMixin:
         if q is None or session is None:
             return
         try:
-            if session._avio_cmd(SETSTREAMCTRL_CMD, struct.pack("<IB3x", 0, q)):
+            if session._avio_cmd(
+                IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ, struct.pack("<IB3x", 0, q)
+            ):
                 _LOGGER.debug("re-applied remembered resolution %s", quality)
         except Exception:
             _LOGGER.debug("could not re-apply resolution %s", quality, exc_info=True)

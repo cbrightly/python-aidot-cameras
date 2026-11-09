@@ -6,6 +6,307 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.1.0]
+
+The consolidation of the camera code against the official app's protocol,
+carried out as the 1.0.0 soak ran, now that 1.0.0 is cut. A minor version
+because it adds to the public surface (firmware version, the offline question,
+the encoder probe and the go2rtc API below) and reworks the insides of both
+transports, and a minor rather than a patch because an integration written
+for 1.0 is not promised to run on it: the go2rtc registration API moved into
+this library and the integration built against it (2.39.0) requires `>=1.1.0,
+<1.2`. Every MQTT operation now rides the one persistent connection with no
+per-operation fallback, the SD listing collects its pages through one
+registration, and both transports send AVIO commands through one function
+each, all on default paths. It runs on the reference installation before the
+integration that carries it is published.
+
+### Added
+- **`CameraDeviceInformation.firmware_version`**: the firmware version the
+  cloud reports (`firmwareVersion`, or `deviceInfo.firmwareVersion`), or None.
+- **`CameraDeviceClient.cloud_reports_offline`**: True only when the cloud has
+  explicitly reported the camera offline, the question the serve loops ask.
+- **`hwaccel.probe_encoder()` and `hwaccel.cached_encoder()`**: a hardware
+  H.264/H.265 encoder proven by a test encode on this host, as an
+  `EncoderPlan(input_args, output_args)`: the arguments for before `-i` and
+  after it, which for VAAPI are the render node, the `format=nv12,hwupload`
+  filter and the codec. VAAPI is tried ahead of QSV. `SOFTWARE_ENCODER` (both
+  empty) means software; `AIDOT_DISABLE_HWACCEL` answers it. Cached on disk
+  with the decoder verdicts.
+- **`go2rtc.async_ensure_stream` and `go2rtc.async_remove_stream`: one locked
+  write path to go2rtc.** `async_ensure_stream(client, name, source=None, *,
+  recreate=False)` sends the optional DELETE (`recreate`, for a camera whose
+  H.264 parameter sets change between sessions) and the PUT under the
+  server's write lock, so no other write lands between them, then, only if
+  the PUT is rejected, the stream-list check. It returns an `EnsureResult`
+  (`outcome`: `REGISTERED`, `UNCHANGED` for a rejected PUT on a stream go2rtc
+  already holds, or `FAILED`; `ok`). `source=None` defines the stream
+  with `PLACEHOLDER_SOURCE`, for a stream whose media is published into it.
+  The Home Assistant integration now registers through it instead of its own
+  copy, and `prefer_go2rtc` (the standalone `_register_with_go2rtc` path) and
+  stream removal on stop go through the same calls. The request sequence
+  go2rtc sees is unchanged.
+- **Experimental, off by default: MQTT credentials the way the app fetches
+  them** (`AIDOT_MQTT_CONFIG2=1`). `GET /v25/commons/mqttConfig2` with
+  `sessionType=App` and a per-install 21-character `sessionId`, generated once
+  and kept in `<AIDOT_TOKEN_FILE>.mqtt-session-id`, or without a token file
+  in login_info as `mqttSessionId`, so it survives a Home Assistant restart. The reply's clientId, password and broker host are
+  used; on any failure the `/commons/userConfig` chain runs as before, and
+  `getServerUrlConfig` is still called for the SDES srflx address. One INFO
+  line names the source, with the clientId and sessionId masked. The hope is
+  a separate clientId per install, so Home Assistant, the CLI and the phone
+  stop evicting each other from the broker; that is unverified. Unset, nothing
+  changes.
+
+### Changed
+- **A DTLS session's end says why.** The "ended after Ns - waiting" line (and
+  the give-up warning) now name what stopped it - the connection's state,
+  the publish ending, no video, or an idle release - and how long before the
+  end media last arrived, so a camera that stopped sending reads differently
+  from a link that dropped under a flowing stream.
+- **A missing broker URL reads as a missing connection.** A device command,
+  device-action query or attribute read no longer checks for the URL first;
+  all three go through one persistent-connection request, so with no URL an
+  attribute read logs the transport failure and returns the device list's
+  properties (it returned None), as it already did with no connection.
+- **`AIDOT_MQTT_CONFIG2`: the fallback broker URL takes the plaintext gate.**
+  When getServerUrlConfig fails and the mqttConfig2 host is used instead, a
+  non-TLS URL is now refused unless `AIDOT_ALLOW_PLAINTEXT_MQTT` is set, and
+  logged, as the main path always did. getServerUrlConfig and the credential
+  fetch now run concurrently. The clientId, host and password that endpoint
+  issues are kept together in one runtime-only record, so its clientId is no
+  longer persisted; `mqttClientId` in stored login_info is userConfig's.
+- **Deprecated knobs warn from one place, one line per knob.** Each of the
+  eight accepted-and-ignored variables now logs its own WARNING, once per
+  process, naming what replaced it. `AIDOT_PERSISTENT_MQTT` warns when it is
+  set to any value, not only when it is set off.
+- **One MQTT connection, and no fallback that evicts it.** Commands, attribute
+  reads, device-action queries and stream-open signaling use only the
+  account's persistent connection. The per-operation session they fell back to
+  when it failed (and that `AIDOT_PERSISTENT_MQTT=0` made the default)
+  connected with the same `mqttClientId`, and the broker allows one session
+  per id, so every fallback evicted the persistent connection it was standing
+  in for. Now an operation that finds no connection reports failure: a command
+  returns False, an attribute read logs the transport failure and returns the
+  device list's properties, a stream open raises `AidotMqttUnavailable`.
+- **One named table of AVIO command ids** in `camera/constants.py`, named after
+  the app's `AVIOCTRLDEFs` (`IOTYPE_USER_IPCAM_SPEAKERSTART`,
+  `E_CMD_AVIO_CTRL_SESSION_MODE_REQ`, `CMD_AVIO_CTRL_HEARTHEAT_REQ`, ...), in
+  place of the numbers spread across eight modules. The existing names
+  (`SETSTREAMCTRL_CMD`, `LISTEVENT_REQ_CMD`, `RECORD_PLAYCONTROL_REQ_CMD`, ...)
+  stay as aliases. No value changes.
+- **One AVIO send per transport.** On DTLS every control frame (session
+  commands, LIVING's PLAY_START, AUDIOSTART, the speaker, the heartbeat) goes
+  through `webrtc.dtls_send_avio`; on SDES the heartbeat, the speaker and the
+  session commands go through the bridge's one encrypted-SCTP sender. The
+  heartbeat keeps its random seq, as the app's does; everything else keeps the
+  dSeq counter. Same bytes on the wire.
+- **The SD listing collects its pages with one registration** instead of 64
+  waiters registered up front, until the listing reports its end, as the app
+  reads `listEventEndFlag`. Same pages, same limits.
+- **The SDES first-media wait has two early-abandon timers, not four.** The
+  battery stale-offer timer (`AIDOT_BATTERY_STALE_OFFER_GRACE_S`, from the
+  camera's first sighting) is unchanged. The unreachable-nominee, no-probe and
+  trigger-unacked rules all waited 20 s, each from its own event (nomination,
+  the answer, the LIVING send), and each fired only on its own shape; they are
+  one timer now, `AIDOT_SDES_NO_MEDIA_GRACE_S` (default 20, `0` disables): no
+  media 20 s after the camera's answer ends the attempt, whatever the shape.
+  The stall WARNING still says which shape it was (`abandoned:
+  unreachable-nominee`, `no-probe` or `trigger-unacked`, the same words as
+  before), and `abandoned: no-media` for an attempt where the camera acted on
+  everything and still sent nothing, which used to run the full 75 s. The
+  INFO status lines for the three old shapes are unchanged. Measured
+  2026-09-22 to 10-09, every one of 165 first medias arrived within 9.5 s of
+  `webrtcReq`.
+- **The DTLS serve loop paces failed opens on one backoff.** Two mechanisms
+  did this before: a slow probe that widened the interval to 600 s after
+  five failures, and the offline pause the SDES and JPEG keepalives use. Now
+  one jittered backoff runs from 15 s up to a 600 s cap, and at the cap
+  every wait is between 540 and 600 s, so a camera that never opens is
+  probed no more often than before. An ICE failure keeps its
+  `AIDOT_BUSY_RETRY_S` (45 s) floor. A camera the cloud reports offline
+  waits the cap at once, ending early (not before the floor) when the cloud
+  reports it back. At the cap the WARNING drops to an INFO line every sixth
+  failure. Unchanged: a busy refusal still waits a flat
+  `AIDOT_BUSY_RETRY_S` without moving the backoff, and a cold encoder still
+  gets four quick 3 s retries first.
+- **One count decides when a DTLS camera's sessions are not worth
+  reopening.** A session fails when it ends within
+  `AIDOT_DTLS_SHORT_SESSION_S` (30 s) or is known to have delivered no
+  video; the rc71 wait after one (30 s, then 30-45 s) is unchanged, and a
+  session with no video canary and no watchdog verdict is still not counted.
+  After `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` (5) failures in a row the serve goes
+  dormant, as five video-less sessions already did. That is new for
+  sessions that keep dying short with video: they were reopened every
+  30-45 s for as long as the keepalive ran. A fresh live view reopens a
+  dormant camera; the count is kept on the camera, so one still failing goes
+  dormant again after one more failed session, and a session that lasts with
+  video starts the count again.
+- **The DTLS mux encodes its AAC with the publishers' encoder**
+  (`aac_track.AacEncoder`) instead of its own decode, resample and FIFO
+  chain. Same timestamps packet for packet, the same silence for lost audio,
+  and the same level normalizer before it; the AAC is now 64 kbit/s, as the
+  direct publish's is. A recording's last partial AAC frame is flushed as it
+  was.
+- **One publish sink for both direct publishers.** The DTLS and SDES
+  publishers each carried their own AAC feed and idle tick, video media clock,
+  HLS TS tee clock and AAC stats; both now hand what they publish to one
+  `PublishSink`. The SDES publisher still forwards the camera's packets as
+  they come rather than rebuilding frames, so a lost packet stays a glitch
+  and not a frozen frame. Two visible differences: the DTLS publish's AAC
+  line at the end of a session now reads like the SDES one (`AAC N frames /
+  N s / N silence-filled / N trimmed / N re-anchors, AAC start aligned +N
+  ms`), and a failure inside the in-sync HLS TS no longer ends a DTLS
+  publish (it never ended an SDES one).
+
+- **The SDES direct publish serves from the camera's answer.** With the
+  answer in hand it launches at the first video packet: it no longer waits
+  the 8 s grace after an abandoned first-media wait (an attempt with no video
+  goes straight to the retry), and the audio wait is decided after the
+  serve is (an H.265 session, which keeps ffmpeg, now gets ffmpeg's 1 s
+  audio wait). Audio still prefers the type seen on the wire: a packet of
+  the other G.711 law than the one announced from the answer (the bridge
+  stamps TUTK-framed audio as PCMA whatever the answer said) is converted
+  instead of dropped, counted as `law_converted` in the publish stats. The
+  ffmpeg serve (H.265, recordings, snapshots) keeps both waits.
+
+- **The SDES bridge starts without waiting for the camera's answer.** The
+  open waited up to 8 s for the `webrtcResp` before starting the bridge, and
+  nothing answered the camera's binding requests while it did. The bridge now
+  starts right after the STUN responder window (kept: it answers the
+  camera's first probes), and an answer that lands later is applied when it
+  does - in the first-media wait, or once the serve is up for a camera that
+  streams before it answers: the camera's SRTP keys and data-channel flag, a
+  nomination from it, its credentials for the bridge's 2.5 s nomination
+  tick, and the off-subnet warning. A camera that refuses (-50002/-50015) is
+  still stopped by the first-media wait's check.
+
+- **Not shipping: one SDES TURN allocation, trickled after the offer.** An
+  earlier entry here announced that the auto connection mode would make one
+  TURN Allocate on the audio socket after `webrtcReq` and trickle the relay,
+  in place of the two Allocates (audio and video) made before the offer.
+  Measured live it was slower: on the A001064 PTZ first media came at +5.3
+  to +6.3 s instead of rc71's +2.9 s, with video arriving 4.2 s after the
+  bridge started instead of 1.7 s, about 2.3 s lost on every cold open (the
+  A001513 L2s, the relay-only one included, showed no difference). Auto mode
+  is back to rc71's behaviour: both sockets are allocated before the offer
+  and the offer carries both relays (`TURN relay pre-allocated (offer)` and
+  `signaling-wait[...] sdes-turn-prealloc ... allocated=2` in the log).
+  Kept from that work: the post-offer allocate retry (when the pre-offer
+  one got nothing) keeps the camera's STUN probes it reads, at most 32 and
+  only packets with the STUN magic cookie, for the STUN window to answer
+  first; and the window reads its sockets lazily, so a socket it has not
+  read when SRTP ends it keeps its packet for the bridge.
+
+### Deprecated
+- **`AIDOT_PERSISTENT_MQTT`** is accepted and ignored; set to
+  `0`/`false`/`no`/`off` it logs one warning. See above.
+- `AIDOT_SDES_ECHO_WAIT_S`, `AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S`,
+  `AIDOT_SDES_ANSWER_PROBE_GRACE_S` and `AIDOT_SDES_TRIGGER_GRACE_S` are still
+  accepted and are ignored; one warning per process names any that are set.
+  The echo wait is gone, and the three graces are replaced by
+  `AIDOT_SDES_NO_MEDIA_GRACE_S`.
+- `AIDOT_DTLS_SLOW_PROBE_THRESHOLD`, `AIDOT_DTLS_SLOW_PROBE_INTERVAL_S` and
+  `AIDOT_DTLS_SLOW_PROBE_LOG_EVERY` are still accepted and are ignored; one
+  warning per process names any that are set. `AIDOT_DTLS_SLOW_PROBE_CHUNK_S`
+  stays, now for every long wait of the serve loop.
+
+### Removed
+- Code nothing called: `protocol._mqtt_session`,
+  `_mqtt_session_with_status`, `_mqtt_session_sync` (the per-operation
+  session) and `_mqtt_get_playback_server_info`; `build_tmmbr` and
+  `decode_tmmbr_bitrate`, whose knob was already gone, with their tests;
+  `decode_remb_bitrate` and `decode_nack_seqs`, which only tests used and which
+  now live in `tests/rtcp_decode.py`.
+- The `_upstream` names left over from upstream 0.3.54-0.3.55
+  (`HAS_TYPED_ACCOUNT`, `UserInformation`, `DEVICE_STATE_IS_UPSTREAMS`,
+  `HAS_READ_DATA_SEAM`, `HAS_SHARED_DISCOVERY_MAP`,
+  `broadcast_protocol_args`). `UPSTREAM_SHAPE` stays, because the integration's
+  diagnostics report it.
+Soak: resets the clock. The SDES open loses paths that never ran in the field,
+and its first-media wait is abandoned on one rule after the answer instead of
+three; both supported SDES models (A001513, A001064) need a live check.
+- **The SDES `webrtcReq`-echo wait, the `webrtcResp` built from it, and the
+  quickConn retry that re-sent it.** The official app never publishes a
+  `webrtcResp` on SDES; it hands the session to its WebRTC stack. Across 18 h of
+  one deployment the 17 opens that took the wait timed out 17 of 17 and all
+  streamed. With it go the 20 s and 5 s branches of the ICE responder window
+  (it is always the 2.5 s one now), the second-answer wait and ffmpeg restart
+  that only an echo armed, and `AIDOT_SDES_ECHO_WAIT_S`. A001064 opens no
+  longer wait 0.25 s for it. A later camera `webrtcResp` that carries a new
+  SRTP key is still adopted; the bridge decrypts with it, and the serve, which
+  reads plain RTP, is no longer restarted for it.
+- **The SDES-to-DTLS fallback.** An SDES open that got no answer, or saw an
+  echo and then no ICE, raised an internal error and the open was retried over
+  DTLS for any camera not flagged `isDTLS=0`. The official app has no such
+  fallback, and the echo-gated half could not fire. An SDES open with no answer
+  now carries on with ffmpeg, as `isDTLS=0` cameras always did. A refusal
+  (`-50002`/`-50015`) is still raised as `AidotCameraBusy`.
+- **The RTP/SAVP serve, where ffmpeg decrypted SDES media from our offer's
+  keys.** Every supported SDES model is in `_PLAIN_RTP_MODELS`, where the bridge
+  decrypts and ffmpeg reads plain RTP. An SDES camera of any other model now
+  fails at the start of the open with `AidotStreamOpenError` naming the model,
+  before an offer is sent, instead of opening a session nothing could decrypt.
+  **This includes the A001108 and A001360 battery cameras:** they are
+  recognised and flagged SDES but have never been seen live, and they now
+  refuse every stream open with that named error until their framing is
+  confirmed and they are added to `_PLAIN_RTP_MODELS`.
+Soak: resets the clock. The changes are to how every DTLS camera's media is
+served (pull, stdout and RTSP push), once the reference installation runs it.
+- **The DTLS serve runs no ffmpeg.** With the direct publish off, a DTLS
+  `rtsp://` push went through `ffmpeg -c:v copy -c:a pcm_alaw`: the camera's
+  A-law was encoded to AAC by the mux and transcoded back to A-law by ffmpeg.
+  The `-` (stdout) serve, and an `http://` serve whose port could not be
+  bound, also went through an ffmpeg `-c copy` hop. Now:
+  - `-` writes the mux's MPEG-TS to stdout as it is muxed, so
+    `aidot-go2rtc <dtls-id> -` behind a go2rtc `exec:` source needs no
+    ffmpeg. A failed write to stdout (its reader has gone) releases the
+    camera until the next view instead of starting another mux into it.
+  - a DTLS `rtsp://` push is always the direct publish: H.264 and the
+    camera's A-law, plus the AAC track unless `AIDOT_PUBLISH_AAC=0`.
+    `AIDOT_DIRECT_PUBLISH=0` (or `StreamSettings(direct_publish=False)`) no
+    longer changes it; it still applies to SDES pushes, and still turns off
+    the in-sync HLS TS, which the publish feeds.
+  - an `http://` serve whose port cannot be bound, or a serve URL that is
+    none of the three (`https://`, `rtsps://`), releases the camera with the
+    reason at ERROR instead of starting ffmpeg.
+- **`_DirectTsServer`**, and the serve relay in front of the DTLS pull serve.
+  A DTLS camera's `http://` serve (the default with only Home Assistant's
+  bundled go2rtc) is now its `TsChannel` on the advertised port
+  (`ts_fanout.TsServer`), bound from the start of the stream to its end, as
+  the relay held the port before. Unchanged: a pull that dials during the
+  camera's handshake connects and waits for its response until the first
+  mux is writing; a consumer starts at the next keyframe after the stream's
+  tables; and a consumer that read one serve cycle's stream is disconnected
+  when the next cycle's mux starts, so it reconnects to a stream it can
+  decode. Changed: a slow consumer no longer holds up the mux (each has its
+  own buffer, resynced at a keyframe past 4 MB), a consumer that joins while
+  another is reading no longer cuts the first one off, and a consumer still
+  waiting for its keyframe when a cycle ends keeps waiting rather than being
+  closed. The fallback that started a consumer on the container's
+  random-access flag when no keyframe signal came within 5 s is gone: the
+  mux always signals. `AIDOT_SERVE_RELAY` now applies to SDES serves only.
+
+### Fixed
+- **A stdout DTLS serve (`aidot-go2rtc <id> -`) no longer stops at the first
+  session end.** The cycle closed its stdout duplicate before the mux's final
+  flush, and that failed write was read as the reader having gone, so the
+  serve released itself whenever a session ended.
+- **A001064 cold open back to about +2.9 s to first media (was +5.4 s).**
+  Removing the webrtcReq echo wait changed when the camera's first STUN
+  probes reach the bridge, which made the PTZ about 2.5 s slower. The camera
+  advertises only a host address this side cannot reach, and media flows on
+  the address it probes from. The 250 ms echo wait used to leave those probes
+  queued when the bridge started, so its first pass learned that address and
+  nominated it at once. Without the wait, the first nomination tick ran on
+  the TURN CreatePermission reply about 30 ms before the first probe. It
+  nominated only the unreachable host, and the working address waited for
+  the next 2.5 s tick, with LIVING and media waiting behind it. A newly
+  learned peer-reflexive address now re-arms the tick, so it is nominated on
+  the pass that learned it. Measured on four cold PTZ opens: +2.83 to +3.29 s,
+  with webrtcReq to first media at 1.9 to 2.1 s, the same as before the
+  removal. The L2 is unchanged at +5.2 s.
+
 ## [1.0.0]
 
 The code released as `1.0.0rc72`, unchanged but for the version: it passed

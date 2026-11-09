@@ -29,6 +29,7 @@ import types
 
 import aidot_cameras.camera.client as camera_client
 from aidot_cameras.camera.client import CameraMixin
+from aidot_cameras.camera.protocol import ReconnectPacer
 
 
 def test_serve_ice_wait_defaults_to_the_old_thirty_seconds(monkeypatch):
@@ -95,6 +96,7 @@ def test_dtls_serve_loop_passes_both_budgets():
         _keepalive_rtsp_url = "http://127.0.0.1:8999/cam.ts"
         device_id = "TESTCAM"
         _serve_ready = _Ready()
+        _dtls_session_pacer = ReconnectPacer(30.0, 45.0)
 
         async def async_open_webrtc_stream(self, *a, **k):
             calls.append(k)

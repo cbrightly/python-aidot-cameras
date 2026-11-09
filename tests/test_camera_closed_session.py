@@ -3,8 +3,9 @@
 Measured 2026-11-08 on an A000088 viewed from outside its network: about one
 session in three ends 19.5-20.4 s after the DTLS handshake with a close_notify
 from the camera, while consent checks are still answered. The serve loop used
-to count that as a short session: 30-45 s with no picture per close. It now
-reopens on the open gate, as after a session that lasted - but only when the camera sent
+to count that as a short (failed) session: 30-45 s with no picture per close,
+and dormant after AIDOT_DTLS_FUTILE_VIDEO_LIMIT in a row. It now reopens on
+the open gate, as after a session that lasted - but only when the camera sent
 the close, video was seen, and the session lived _CAMERA_CLOSE_MIN_S.
 """
 
@@ -17,7 +18,7 @@ from OpenSSL import SSL
 
 from aidot_cameras._vendor.aiortc import rtcdtlstransport as dtls
 from aidot_cameras.camera import client as cc
-from aidot_cameras.camera.client import _camera_closed_session, _session_end_pacing
+from aidot_cameras.camera.client import _camera_closed_session, _session_end_wait
 from aidot_cameras.camera.protocol import ReconnectPacer
 
 from tests.test_dtls_serve_backoff import _close_pc_after
@@ -136,8 +137,13 @@ def test_anything_unreadable_is_not_a_camera_close(pc):
 
 
 def _pace(pacer, lived, *, video=True, closed=True):
-    return _session_end_pacing(
-        pacer, lived, had_video=video, threshold_s=30.0, camera_closed=closed
+    return _session_end_wait(
+        pacer,
+        lived,
+        no_video=not video,
+        threshold_s=30.0,
+        limit=3,
+        camera_closed=closed,
     )
 
 
@@ -152,7 +158,7 @@ def test_a_camera_close_after_20s_reopens_at_once_and_resets_the_pacer():
     assert p.attempt == 0
 
 
-def test_camera_closes_in_a_row_keep_reopening_at_once():
+def test_camera_closes_the_caller_allows_keep_reopening_at_once():
     p = _pacer()
     assert [_pace(p, 20.0) for _ in range(10)] == [0.0] * 10
 
@@ -161,7 +167,7 @@ def test_a_camera_close_inside_the_floor_is_still_short():
     """A camera that closes every session at once still meets the backoff."""
     p = _pacer()
     lived = cc._CAMERA_CLOSE_MIN_S - 0.5
-    assert [_pace(p, lived) for _ in range(3)] == [30.0, 45.0, 45.0]
+    assert [_pace(p, lived) for _ in range(3)] == [30.0, 45.0, None]
 
 
 def test_a_camera_close_without_video_is_still_short():
@@ -267,3 +273,65 @@ def test_a_fourth_camera_close_in_a_row_is_paced(
     reopened, paced = _reopens_and_waits(caplog)
     assert len(reopened) == cc._CAMERA_CLOSE_RUN_MAX == 3, reopened
     assert len(paced) == 1, paced
+
+
+# --------------------------------------------------------------------------- #
+# A stdout serve outlives the session                                          #
+# --------------------------------------------------------------------------- #
+
+
+def _stdout_run(monkeypatch, make_camera_device_client, *, reader_gone):
+    """A stdout serve (the go2rtc exec: source) whose session's PC closes.
+
+    The mux writes its final flush after the stop flag, as the real one does;
+    with ``reader_gone`` its writes fail before the cycle ends instead."""
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
+
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.1")  # it lasted
+    cam = make_camera_device_client("A000088")
+    cam._stream_idle_opt = 0.0
+    run = DtlsServeRun(monkeypatch, cam, [FakeDtlsSession()], url="-", timeout=1.5)
+
+    def _mux(vq, aq, wfile, progress, stop, *, state=None, **kw):
+        import time
+
+        try:
+            while not stop.is_set():
+                if reader_gone:
+                    raise BrokenPipeError
+                progress[0] = time.monotonic()
+                stop.wait(0.002)
+            wfile.write(b"G" * 188)  # the final flush
+            failed = False
+        except (OSError, ValueError):
+            failed = True
+        if state is not None:
+            state["failed"] = failed
+
+    monkeypatch.setattr(cc, "_dtls_av_mux_run", _mux)
+    _close_pc_after(cam, 0.3)
+    return run
+
+
+def test_a_session_end_does_not_release_a_stdout_serve(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """The cycle closes its stdout duplicate before joining the mux, so the
+    mux's last write fails; that is the teardown, not the reader leaving."""
+    run = _stdout_run(monkeypatch, make_camera_device_client, reader_gone=False)
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("no longer read" in m for m in msgs), msgs
+    assert run.opens == 2
+
+
+def test_a_reader_that_leaves_still_releases_a_stdout_serve(
+    monkeypatch, make_camera_device_client, caplog
+):
+    run = _stdout_run(monkeypatch, make_camera_device_client, reader_gone=True)
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("no longer read" in m for m in msgs), msgs
+    assert run.opens == 1

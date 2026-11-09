@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot_cameras.client import AidotClient
 from aidot_cameras.const import (
+    LOGIN_INFO_MQTT_CREDENTIALS_KEY,
     LOGIN_INFO_MQTT_PASSWORD_KEYS,
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
@@ -88,10 +89,12 @@ def test_serializable_login_info_keeps_real_state_when_no_runtime_keys_present()
 def test_runtime_only_keys_constant_matches_the_key_names_written():
     # Locks the literal key names camera/client.py actually writes - the
     # persistent-MQTT client and lock (_get_persistent_mqtt) plus the cached
-    # MQTT password - against the shared frozenset, so a rename on one side
-    # without the other cannot silently reopen either bug.
+    # MQTT password and the mqttConfig2 broker host paired with it - against
+    # the shared frozenset, so a rename on one side without the other cannot
+    # silently reopen either bug.
     assert RUNTIME_ONLY_LOGIN_INFO_KEYS == {
         LOGIN_INFO_PERSISTENT_MQTT_KEY,
         LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
         *LOGIN_INFO_MQTT_PASSWORD_KEYS,
+        LOGIN_INFO_MQTT_CREDENTIALS_KEY,
     }

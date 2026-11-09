@@ -198,7 +198,7 @@ def test_deregister_never_removes_a_stream_we_did_not_register():
 
     class _Client:
         def __init__(self, session, base):
-            pass
+            self.base_url = base
 
         async def remove_stream(self, name):
             removed.append(name)

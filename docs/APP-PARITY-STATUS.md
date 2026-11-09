@@ -57,8 +57,8 @@ answer in roughly 240 ms.
 ### D - terminal acks: implemented
 
 `_WEBRTC_TERMINAL_ACK_CODES = (-50002, -50015)` in `protocol.py`, honoured on
-both transports - the SDES branch checks it before an open and before spending a
-DTLS fallback, and the keepalive backs off to `_MAX_DELAY` rather than minting a
+both transports - the SDES branch checks it before an open and races it against
+the answer and the first media, and the keepalive backs off to `_MAX_DELAY` rather than minting a
 fresh peerid into a camera that just refused one.
 
 ## Parity that was confirmed, not assumed

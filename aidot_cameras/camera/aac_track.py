@@ -352,6 +352,7 @@ class AacEncoder:
             format="fltp", layout="mono", rate=AAC_CLOCK_RATE
         )
         self._in = 0
+        self._flushed = False
 
     def encode(self, alaw: bytes) -> List[bytes]:
         np = self._np
@@ -364,6 +365,21 @@ class AacEncoder:
         for resampled in self._resampler.resample(frame):
             for pkt in self._ctx.encode(resampled):
                 out.append(bytes(pkt))
+        return out
+
+    def flush(self) -> List[bytes]:
+        """End of stream: the access units the resampler and encoder still
+        hold (the last, partial frame and the encoder's delay). Once only:
+        a second call returns nothing."""
+        out: List[bytes] = []
+        if self._flushed:
+            return out
+        self._flushed = True
+        for resampled in self._resampler.resample(None):
+            for pkt in self._ctx.encode(resampled):
+                out.append(bytes(pkt))
+        for pkt in self._ctx.encode(None):
+            out.append(bytes(pkt))
         return out
 
 

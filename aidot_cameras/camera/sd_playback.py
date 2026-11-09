@@ -34,8 +34,15 @@ import datetime
 import struct
 from typing import Any, NamedTuple, Optional
 
-RECORD_PLAYCONTROL_REQ_CMD = 0x31A
-RECORD_PLAYCONTROL_RESP_CMD = 0x31B
+from .constants import (
+    IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL,
+    IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL_RESP,
+)
+
+#: Short names for the playback command ids, for the sdes_open and
+#: webrtc_open callers; this module uses the IOTYPE_* names.
+RECORD_PLAYCONTROL_REQ_CMD = IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL
+RECORD_PLAYCONTROL_RESP_CMD = IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL_RESP
 
 # Values from the vendor enum. START and STOP are the ones exercised on
 # hardware (A001064, 2026-10-27); the others are listed so a caller does not
@@ -164,7 +171,7 @@ def play_end_waiter(router: Any) -> Any:
     """Listen for the camera's PLAY_END for a session's life: a 0x31b reply
     nobody asked for, sent when the recording has run out. Register it before
     PLAY_START goes out."""
-    return router.expect(RECORD_PLAYCONTROL_RESP_CMD, answers(PLAY_END))
+    return router.expect(IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL_RESP, answers(PLAY_END))
 
 
 def session_mode_of(payload: Optional[bytes]) -> Optional[int]:
@@ -296,8 +303,7 @@ class _CameraSdPlaybackMixin:
 def playback_peer_id(camera: Any, *, sdes: bool) -> str:
     """The peer id a playback open announces, for the SDES or DTLS transport.
 
-    The SDES-to-DTLS fallback builds a fresh one with ``sdes=False``: the
-    SDES id's transport digit is wrong for DTLS, and a live id (class 2,
+    The transport digit differs between the two, and a live id (class 2,
     PRE_LINK) would get audio alone from an H265-recording camera.
     """
     return camera.generate_webrtc_peer_id(
@@ -824,7 +830,7 @@ class _PlaybackControls:
         if start is None or start.record is None:
             return None
         resp = await self.async_avio_request(  # type: ignore[attr-defined]
-            RECORD_PLAYCONTROL_REQ_CMD,
+            IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL,
             playcontrol_payload(
                 command,
                 start.record,
@@ -832,7 +838,7 @@ class _PlaybackControls:
                 param=param,
                 offset_s=offset_s,
             ),
-            response_cmd=RECORD_PLAYCONTROL_RESP_CMD,
+            response_cmd=IOTYPE_USER_IPCAM_RECORD_PLAYCONTROL_RESP,
             timeout=timeout,
             # Every playback command's reply has the one AVIO id; take only
             # the one that echoes this command.

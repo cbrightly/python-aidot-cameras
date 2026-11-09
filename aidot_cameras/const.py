@@ -78,6 +78,13 @@ LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY = "_persistent_mqtt_lock"
 # start fetches a fresh one - a single extra HTTP call.
 LOGIN_INFO_MQTT_PASSWORD_KEYS = ("mqttPassword", "mqttPwd")
 
+# The record of the fetch that issued the MQTT password in login_info:
+# ``{"source", "password", "clientId", "host"}``, written and replaced as a
+# unit.  It holds the password, so it is runtime-only like the password, and
+# its clientId and host count only while its password is still the account's
+# (a broker refusal pops the password; a re-login clears both).
+LOGIN_INFO_MQTT_CREDENTIALS_KEY = "_mqttCredentials"
+
 
 def is_camera_model(model_id: "str | None") -> bool:
     """True for an AiDot IPC (camera) model id, e.g. ``LK.IPC.A001513``.
@@ -92,5 +99,6 @@ RUNTIME_ONLY_LOGIN_INFO_KEYS = frozenset(
         LOGIN_INFO_PERSISTENT_MQTT_KEY,
         LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
         *LOGIN_INFO_MQTT_PASSWORD_KEYS,
+        LOGIN_INFO_MQTT_CREDENTIALS_KEY,
     }
 )

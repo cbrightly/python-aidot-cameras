@@ -23,14 +23,19 @@ import tempfile
 import threading
 import time
 import zlib
+from fractions import Fraction
 from typing import Any, Callable, Optional, NamedTuple
 
+from .aac_track import AAC_CLOCK_RATE
 from .agc import AlawAgc
 from .constants import TALK_PCM_FRAME_BYTES, TALK_PCM_RATE
 
 from .. import settings
 
 _LOGGER = logging.getLogger(__name__)
+
+#: The AAC stream's time base in the A/V mux (one per process, not per packet).
+_AAC_TIME_BASE = Fraction(1, AAC_CLOCK_RATE)
 
 
 def _make_status_pair(status_callback, logger):
@@ -180,13 +185,6 @@ def _build_stun_binding_success_response(
 
 
 _WEBRTC_TERMINAL_ACK_CODES = (-50002, -50015)
-
-# If a post-connect MQTT drop stays disconnected longer than this (seconds) with
-# no successful paho reconnect, the receive loop ends the session rather than
-# polling a dead socket until the full duration deadline.  Long enough to ride
-# out an ordinary network blip + paho's auto-reconnect, short enough that a
-# terminal drop (session taken over, revoked creds, broker gone) fails fast.
-_MQTT_RECONNECT_GRACE = 20.0
 
 
 def _terminal_webrtc_ack(msg: dict):
@@ -365,10 +363,9 @@ def answer_inserted_a_section(
     over.
 
     The distinction is load-bearing: the cap comes from 63 opens on a mains
-    A000088 that connects in 9 s, and an SDES camera reaching this path through
-    the SDES->DTLS fallback can take 25-70 s to open cold. Cutting its deadline
-    to 15 s on a shape that was never measured would break exactly the streaming
-    this must not break.
+    A000088 that connects in 9 s, and a camera opened over DTLS cold can take
+    25-70 s. Cutting its deadline to 15 s on a shape that was never measured
+    would break exactly the streaming this must not break.
     """
     return shifted_sections > 0 and unclaimed_answer_mids > 0
 
@@ -786,25 +783,40 @@ class ReconnectPacer:
         cap: float,
         *,
         rand: Optional[Callable[[], float]] = None,
+        floor_frac: float = 0.0,
     ) -> None:
         self._base = base
         self._cap = cap
         self._rand = rand  # forwarded to next_backoff; injectable for tests
+        #: At the cap, ``fail_delay`` draws in ``[floor_frac * cap, cap]``
+        #: rather than ``[base, cap]`` (0: no floor).
+        self._floor_frac = floor_frac
         self._attempt = 0
 
     @property
     def attempt(self) -> int:
-        """Consecutive-failure count (read-only). Callers that need to escalate
-        beyond this pacer's own cap (see the DTLS serve loop's slow-probe
-        throttle) key off this instead of duplicating the counter."""
+        """Consecutive-failure count (read-only)."""
         return self._attempt
+
+    def _ceiling_at_cap(self, attempt: int) -> bool:
+        return self._base * 2 ** min(max(attempt, 0), 30) >= self._cap
+
+    @property
+    def at_cap(self) -> bool:
+        """True when the last counted failure's backoff had reached ``cap``."""
+        return self._attempt > 0 and self._ceiling_at_cap(self._attempt - 1)
 
     def fail_delay(self) -> float:
         """Delay after a failed OPEN (no session established): the current attempt's
         backoff, then escalate - so the first failure waits exactly ``base``."""
-        delay = next_backoff(
-            self._attempt, base=self._base, cap=self._cap, rand=self._rand
-        )
+        if self._floor_frac and self._ceiling_at_cap(self._attempt):
+            delay = next_backoff(
+                1, base=self._floor_frac * self._cap, cap=self._cap, rand=self._rand
+            )
+        else:
+            delay = next_backoff(
+                self._attempt, base=self._base, cap=self._cap, rand=self._rand
+            )
         self._attempt += 1
         return delay
 
@@ -820,6 +832,16 @@ class ReconnectPacer:
         """Clear the failure count - e.g. after a successful open in a loop that has
         no end-of-session escalation (the DTLS serve loop, gated by its own spacing)."""
         self._attempt = 0
+
+
+def _repeat_log_level(n: int, *, every: int = 0, loud: int = logging.INFO) -> int:
+    """The level for the ``n``-th repeat (from 0) of a recurring log line:
+    ``loud`` for the first and, with ``every``, for every ``every``-th after
+    it; DEBUG for the rest. A condition that persists for hours then says so
+    without a line per occurrence."""
+    if n == 0 or (every and n % every == 0):
+        return loud
+    return logging.DEBUG
 
 
 def _write_text_file(path: str, text: str) -> None:
@@ -1155,273 +1177,10 @@ def _warn_lan_serve(host: "Optional[str]", *, context: str) -> None:
     )
 
 
-class _DirectTsServer:
-    """Serve the muxed MPEG-TS straight to the consumer, no ffmpeg in between.
-
-    The hop this replaces is `ffmpeg -fflags +nobuffer -i pipe:0 -c copy
-    -f mpegts -listen 1 http://...`. It re-packetizes MPEG-TS that
-    `_dtls_av_mux_run` already wrote in exactly the form go2rtc wants, and
-    measured 2026-08-20 it is the one component in the chain that LOSES
-    timestamps: 64,981 video PES leave the mux with PTS_DTS_flags == 3 (both
-    timestamps) and none missing, while ffmpeg's own output on the wire carried
-    8 PES with flags == 0 in 12,729. go2rtc renders those as RTP timestamp 0 and
-    Home Assistant reports the constant negative DTS.
-
-    Writes are DROPPED when nobody is pulling, deliberately. The mux runs
-    regardless of consumers, and buffering would hand a late consumer a backlog
-    - which is what puts Home Assistant's base timestamp seconds into the stream
-    in the first place. A live view wants the newest bytes, not a queue.
-
-    JOIN-AWARENESS is the thing the ffmpeg hop was actually contributing, and
-    without it this server does not work. `ffmpeg -listen 1` does not splice an
-    ongoing stream: it STARTS its output when a client connects, so every
-    consumer gets PAT/PMT and the H.264 parameter sets from byte 0. Forwarding
-    the live stream from wherever a consumer happens to arrive drops it
-    mid-GOP, referencing an SPS/PPS it never received. Measured offline: a
-    mid-stream join gives "non-existing PPS 0 referenced" and no track, while
-    the identical bytes from byte 0 describe cleanly - which is why go2rtc
-    registered a producer and then answered DESCRIBE with 404.
-
-    So the last PAT and PMT are cached, and a new consumer is held until the
-    next random-access point (the adaptation field's random_access_indicator,
-    which is what marks a keyframe in MPEG-TS). It then receives PAT, PMT, and
-    media starting at that keyframe - the parameter sets ride in the keyframe's
-    own access unit, which is how these cameras send them.
-
-    A consumer that disappears must never propagate into the mux thread, so
-    every socket error is swallowed here and the writer simply becomes a no-op
-    until the next consumer connects.
-    """
-
-    def __init__(self, public_port: int, *, host: str = "127.0.0.1") -> None:
-        self._port = public_port
-        self._host = host
-        self._listen: "Optional[socket.socket]" = None
-        self._accept_thread: "Optional[threading.Thread]" = None
-        self._client: "Optional[socket.socket]" = None
-        self._lock = threading.Lock()
-        self._closed = threading.Event()
-        self._tail = b""  # partial TS packet across write() calls
-        self._pat: "Optional[bytes]" = None
-        self._pmt: "Optional[bytes]" = None
-        self._pmt_pid: "Optional[int]" = None
-        self._synced = False  # has the current consumer been given a start
-        # Set by the mux immediately before it writes a video keyframe, so a new
-        # consumer can be spliced where the picture is actually decodable.
-        self._kf_pending = False
-        self._kf_ever = False
-        self._waiting_since: "Optional[float]" = None
-
-    @property
-    def port(self) -> int:
-        return self._port
-
-    def start(self) -> None:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        _warn_lan_serve(self._host, context="direct-serve")
-        s.bind((self._host, self._port))
-        s.listen(8)
-        s.settimeout(0.5)
-        self._port = s.getsockname()[1]
-        self._listen = s
-        self._accept_thread = threading.Thread(
-            target=self._accept_loop, name="direct-ts-accept", daemon=True
-        )
-        self._accept_thread.start()
-
-    def has_consumer(self) -> bool:
-        with self._lock:
-            return self._client is not None
-
-    def pending_bytes(self) -> int:
-        """Always 0 - this server queues nothing. Exists so the no-buffering
-        promise is assertable rather than merely documented."""
-        return 0
-
-    def _accept_loop(self) -> None:
-        while not self._closed.is_set():
-            try:
-                cli, _ = self._listen.accept()
-            except TimeoutError:
-                continue
-            except OSError:
-                return
-            try:
-                cli.settimeout(5.0)
-                cli.recv(4096)  # consume the request line and headers
-                cli.sendall(
-                    b"HTTP/1.0 200 OK\r\n"
-                    b"Content-Type: video/mp2t\r\n"
-                    b"Cache-Control: no-cache\r\n"
-                    b"Connection: close\r\n\r\n"
-                )
-                cli.settimeout(None)
-            except OSError:
-                try:
-                    cli.close()
-                except OSError:
-                    pass
-                continue
-            with self._lock:
-                old, self._client = self._client, cli
-                self._synced = False  # a new consumer must resync
-            if old is not None:
-                try:
-                    old.close()
-                except OSError:
-                    pass
-
-    @staticmethod
-    def _pid(pkt: bytes) -> int:
-        return ((pkt[1] & 0x1F) << 8) | pkt[2]
-
-    @staticmethod
-    def _is_random_access(pkt: bytes) -> bool:
-        """True when this TS packet carries a random-access point (keyframe)."""
-        if not (pkt[3] & 0x20):  # no adaptation field
-            return False
-        if pkt[4] == 0:  # zero-length adaptation field
-            return False
-        return bool(pkt[5] & 0x40)  # random_access_indicator
-
-    def _learn_pmt_pid(self, pat: bytes) -> None:
-        """Read the first program's PMT PID out of a PAT so the PMT can be
-        cached too. Cheap and best-effort: a malformed PAT just leaves the
-        previous value in place."""
-        try:
-            i = 4
-            if pat[3] & 0x20:
-                i += 1 + pat[4]
-            i += 1 + pat[i]  # pointer_field
-            if pat[i] != 0x00:  # table_id must be PAT
-                return
-            self._pmt_pid = ((pat[i + 10] & 0x1F) << 8) | pat[i + 11]
-        except (IndexError, ValueError):
-            return
-
-    #: How long a new consumer may wait for a keyframe signal before the old
-    #: PID-blind random-access test is allowed to start it anyway. The signal is
-    #: the correct trigger, but a stream that never sends one must not hang
-    #: forever - gating solely on a video-pid flag served ZERO bytes when tried
-    #: (2026-08-29), because the muxer does not set it.
-    _LEGACY_SYNC_AFTER_S = 5.0
-
-    def mark_keyframe(self) -> None:
-        """Tell the server the next bytes written begin a video keyframe.
-
-        The mux knows this and used to throw it away: it pulls ``(data, ts, kf)``
-        off the queue and ``kf`` came from ``_h264_has_keyframe`` at the tap.
-        Everything downstream then tried to rediscover it from the container,
-        which does not carry it - PyAV's mpegts muxer does not set
-        ``random_access_indicator`` on the video PID in this stream, so a sync
-        gated on that flag never fires at all.
-
-        Splicing a consumer anywhere else hands it video mid-GOP referencing an
-        SPS/PPS it never received, which decodes as "non-existing PPS 0
-        referenced": a video track that never produces a frame.
-        """
-        if not self._kf_ever:
-            _LOGGER.debug("direct-ts: first keyframe signal reached the server")
-        self._kf_ever = True
-        self._kf_pending = True
-
-    def _legacy_sync_ok(self, pkt: bytes) -> bool:
-        """The pre-signal behaviour, allowed only after a grace period.
-
-        Kept because a source that never calls ``mark_keyframe`` must still be
-        servable. Deliberately NOT the first choice: this test accepts a
-        random-access point on ANY pid, and AAC audio sets that flag ~50x/s, so
-        before the signal existed a late joiner was spliced onto audio and never
-        received a decodable picture.
-        """
-        if self._kf_ever:
-            return False  # this source signals; wait for the real thing
-        if not self._is_random_access(pkt):
-            return False
-        now = time.monotonic()
-        if self._waiting_since is None:
-            self._waiting_since = now
-            return False
-        return (now - self._waiting_since) >= self._LEGACY_SYNC_AFTER_S
-
-    def write(self, b: bytes) -> int:
-        data = self._tail + b if self._tail else b
-        out = bytearray()
-        i = 0
-        n = len(data)
-        while i + 188 <= n:
-            if data[i] != 0x47:  # resync to the next sync byte
-                j = data.find(b"\x47", i + 1)
-                if j < 0:
-                    i = n
-                    break
-                i = j
-                continue
-            pkt = data[i : i + 188]
-            i += 188
-            pid = self._pid(pkt)
-            if pid == 0:
-                self._pat = pkt
-                self._learn_pmt_pid(pkt)
-            elif self._pmt_pid is not None and pid == self._pmt_pid:
-                self._pmt = pkt
-            if self._synced:
-                out += pkt
-            elif self._kf_pending or self._legacy_sync_ok(pkt):
-                _LOGGER.debug(
-                    "direct-ts: spliced a consumer via=%s signals=%s pid=%s",
-                    "keyframe-signal" if self._kf_pending else "legacy-rai",
-                    self._kf_ever,
-                    pid,
-                )
-                # Start this consumer here: tables first, then the keyframe.
-                if self._pat is not None:
-                    out += self._pat
-                if self._pmt is not None:
-                    out += self._pmt
-                out += pkt
-                self._synced = True
-                self._kf_pending = False
-                self._waiting_since = None
-        self._tail = data[i:] if i < n else b""
-
-        with self._lock:
-            cli = self._client
-        if cli is None or not out:
-            return len(b)  # nobody pulling, or nothing to send yet
-        try:
-            cli.sendall(bytes(out))
-        except OSError:
-            with self._lock:
-                if self._client is cli:
-                    self._client = None
-                self._synced = False
-            try:
-                cli.close()
-            except OSError:
-                pass
-        return len(b)
-
-    def flush(self) -> None:
-        return None
-
-    def close(self) -> None:
-        self._closed.set()
-        with self._lock:
-            cli, self._client = self._client, None
-        for sock in (cli, self._listen):
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-        self._listen = None
-
-
 class _ServeRelay:
     """Keep a public TCP serve port continuously connectable while the real
-    server (ffmpeg ``-listen 1``) comes and goes on an internal port.
+    server (ffmpeg ``-listen 1``) comes and goes on an internal port. SDES
+    only: a DTLS pull serve holds its own port (``ts_fanout.TsServer``).
 
     Why this exists: the library advertises the public serve port to go2rtc / HA
     the moment a view starts, but ffmpeg only binds its ``-listen`` socket AFTER
@@ -1812,13 +1571,13 @@ def _dtls_av_mux_run(
     video_codec="h264",
 ) -> None:
     """Mux tapped video (H.264 copy) + audio (PCMA->AAC) to ``out_fileobj`` as
-    RTP-timestamped MPEG-TS.  Runs in a worker thread; the serve's ffmpeg reads
-    the other end of the pipe and serves it over HTTP-listen.
+    RTP-timestamped MPEG-TS.  Runs in a worker thread; ``out_fileobj`` is the
+    serve's sink (the pull server, this process's stdout, or a recording).
 
     - Video is copied (no re-encode - Pi-friendly) with the camera's 90 kHz RTP
       timestamps, so DTS is clean/monotonic (fixes HA's "No dts" stutter).
     - MPEG-TS can't carry G.711 PCMA, so audio is transcoded to AAC (trivial CPU
-      at 8 kHz mono).
+      at 8 kHz mono) by ``aac_track.AacEncoder``, the publishers' encoder.
       The A-law is conditioned by ``AlawAgc`` first, the same normalizer the
       direct publishers run, so a serve and a publish sound the same.
     - ``progress[0]`` is bumped on every successful mux so the serve loop can
@@ -1841,7 +1600,6 @@ def _dtls_av_mux_run(
         raise ValueError("video_codec=None needs align_audio_start")
     import time as _t
     import queue as _q
-    from fractions import Fraction
 
     try:
         import av
@@ -1886,8 +1644,7 @@ def _dtls_av_mux_run(
         def mark_keyframe(self):
             """Forward the keyframe signal when the sink understands it.
 
-            The sink is a _DirectTsServer on the direct path and an os pipe to
-            ffmpeg otherwise; only the former can use this.
+            The pull server uses it; stdout and a recording file do not.
             """
             fn = getattr(self._f, "mark_keyframe", None)
             if fn is not None:
@@ -1913,24 +1670,26 @@ def _dtls_av_mux_run(
         vs = out.add_stream(video_codec)
         vs.time_base = Fraction(1, 90000)
     try:
-        adec = av.CodecContext.create("pcm_alaw", "r")
-        adec.sample_rate = 8000
-        adec.layout = "mono"
-        # Resample 8 kHz PCMA -> 48 kHz AAC: 8 kHz AAC decodes but is commonly
-        # silent in browser / iOS / go2rtc players; 48 kHz is universally played.
-        aenc = out.add_stream("aac", rate=48000)
+        from .aac_track import (
+            AAC_SAMPLES_PER_FRAME,
+            ALAW_SILENCE,
+            PCMA_RATE,
+            AacEncoder,
+        )
+        from .ts_tee import adts_header
+
+        # PCMA 8 kHz -> AAC 48 kHz with the publishers' encoder: 8 kHz AAC
+        # decodes but is commonly silent in browser / iOS / go2rtc players;
+        # 48 kHz is universally played. The stream is only muxed into, as
+        # ts_tee's is: each access unit goes in with its ADTS header.
+        aenc = out.add_stream("aac", rate=AAC_CLOCK_RATE)
         aenc.layout = "mono"
-        resampler = av.AudioResampler(format="fltp", layout="mono", rate=48000)
-        fifo = av.AudioFifo()
+        aac = AacEncoder()
 
         # The level normalizer every served path runs (see agc.py): it works
-        # on the A-law bytes before they are decoded, so the mux conditions
+        # on the A-law bytes before they are encoded, so the mux conditions
         # exactly what the direct publishers condition.
         agc = AlawAgc()
-        try:
-            import numpy as _np
-        except Exception:
-            _np = None
         have_audio = True
     except Exception as exc:
         _LOGGER.debug("DTLS A/V mux: audio disabled: %s", exc)
@@ -1939,10 +1698,12 @@ def _dtls_av_mux_run(
     _ts_state = {}
     _slack = _reorder_slack()
     # Audio starts where video does: video presentation is shifted by the
-    # slack (90 kHz), so shift audio (48 kHz) by the same time.
-    a_pts = [_slack * 48000 // 90000 if align_audio_start else 0]
+    # slack (90 kHz), so shift audio (48 kHz) by the same time. The encoder's
+    # first access unit is its 1024-sample priming, stamped one frame early
+    # so the first real sample lands on that start.
+    a_pts = [(_slack * 48000 // 90000 if align_audio_start else 0) - 1024]
     a_rtp0 = [None]  # first audio RTP timestamp (8 kHz units), for gap detection
-    a_in = [0]  # 8 kHz samples emitted to the resampler so far (incl. concealed)
+    a_in = [0]  # 8 kHz samples handed to the encoder so far (incl. concealed)
     vstarted = [False]
     # A failed container write is TERMINAL for this mux: the pipe's ffmpeg is
     # gone (EPIPE) and can never come back for this cycle.  Swallowing it and
@@ -2031,104 +1792,69 @@ def _dtls_av_mux_run(
             except _q.Empty:
                 pass
             return
-        try:
-            while True:
-                try:
-                    data, _ts = aq.get_nowait()
-                except _q.Empty:
-                    break
-                # Lock audio to its RTP clock.  The camera's PCMA RTP timestamp is
-                # an 8 kHz sample count; on packet loss it jumps ahead of the
-                # samples we've actually decoded.  Without filling that gap the
-                # audio timeline silently COMPRESSES (the lost time vanishes), so
-                # audio runs ahead of the RTP-timestamped video -> growing A/V
-                # desync and player jitter-buffer resyncs, heard as choppiness.
-                # Conceal the gap with silence (PLC) through the same stateful
-                # resampler, mirroring what the video path does with its 90 kHz
-                # timestamps.  Lossless streams have _gap == 0 (no-op).
-                if _np is not None:
-                    if a_rtp0[0] is None:
-                        a_rtp0[0] = int(_ts)
-                    _expected = (int(_ts) - a_rtp0[0]) & 0xFFFFFFFF
-                    _gap = _expected - a_in[0]
-                    if _gap < 0 or _gap > 8000 * 5:
-                        a_in[0] = _expected  # wrap / stream reset -> resync, no fill
-                    elif _gap >= 160:  # >= 20 ms missing: conceal with silence
-                        try:
-                            _sil = _np.zeros((1, int(_gap)), dtype=_np.int16)
-                            _sfr = av.AudioFrame.from_ndarray(
-                                _sil, format="s16", layout="mono"
-                            )
-                            _sfr.sample_rate = 8000
-                            for _rfr in resampler.resample(_sfr):
-                                fifo.write(_rfr)
-                            a_in[0] += int(_gap)
-                        except Exception:
-                            _LOGGER.debug(
-                                "swallowed exception in %s",
-                                "_flush_audio",
-                                exc_info=True,
-                            )
-                for fr in adec.decode(av.Packet(agc.process(data))):
-                    _ndec = fr.samples
-                    fr.pts = None
-                    for rfr in resampler.resample(fr):  # 8k PCMA -> 48k fltp
-                        fifo.write(rfr)
-                    a_in[0] += _ndec
-        except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_flush_audio", exc_info=True)
         while True:
-            fr = fifo.read(1024)  # AAC wants 1024-sample frames
-            if fr is None:
-                # FIFO has < 1024 samples.  The audio source is continuous
-                # (measured: 100% timeline coverage, no lost packets), so the
-                # remainder must stay in the FIFO and be completed by the next
-                # decoded packet - NOT padded with silence here.  Padding on
-                # every 5 ms flush injected a micro-silence whenever the FIFO was
-                # momentarily short (almost always, given ~40 ms packet spacing) -
-                # that was the choppiness.  Only on the final drain do we pad the
-                # last partial frame so the encoder can flush it.
-                if not drain:
-                    break
-                s = getattr(fifo, "samples", 0)
-                if s == 0:
-                    break
-                fr = fifo.read(s)
-                if fr is None or fr.samples == 0:
-                    break
-                if _np is not None:
-                    try:
-                        arr = fr.to_ndarray()
-                        pad_n = 1024 - arr.shape[1]
-                        if pad_n > 0:
-                            padded = _np.concatenate(
-                                [
-                                    arr,
-                                    _np.zeros((arr.shape[0], pad_n), dtype=arr.dtype),
-                                ],
-                                axis=1,
-                            )
-                            pfr = av.AudioFrame.from_ndarray(
-                                padded, format="fltp", layout="mono"
-                            )
-                            pfr.sample_rate = 48000
-                            fr = pfr
-                    except Exception:
-                        break
-            fr.pts = a_pts[0]
-            fr.time_base = Fraction(1, 48000)
-            a_pts[0] += fr.samples
             try:
-                for opkt in aenc.encode(fr):
-                    out.mux(opkt)
-                    progress[0] = _t.monotonic()
+                data, _ts = aq.get_nowait()
+            except _q.Empty:
+                break
+            # Lock audio to its RTP clock.  The camera's PCMA RTP timestamp is
+            # an 8 kHz sample count; on packet loss it jumps ahead of the
+            # samples we've actually encoded.  Without filling that gap the
+            # audio timeline silently COMPRESSES (the lost time vanishes), so
+            # audio runs ahead of the RTP-timestamped video -> growing A/V
+            # desync and player jitter-buffer resyncs, heard as choppiness.
+            # Conceal the gap with silence (PLC) through the same encoder,
+            # mirroring what the video path does with its 90 kHz timestamps.
+            # Lossless streams have _gap == 0 (no-op).
+            if a_rtp0[0] is None:
+                a_rtp0[0] = int(_ts)
+            _expected = (int(_ts) - a_rtp0[0]) & 0xFFFFFFFF
+            _gap = _expected - a_in[0]
+            _alaw = agc.process(data)
+            if _gap < 0 or _gap > PCMA_RATE * 5:
+                a_in[0] = _expected  # wrap / stream reset -> resync, no fill
+            elif _gap >= 160:  # >= 20 ms missing: conceal with silence
+                _alaw = ALAW_SILENCE * _gap + _alaw
+            a_in[0] += len(_alaw)
+            try:
+                _aus = aac.encode(_alaw)
+            except Exception:
+                _LOGGER.debug(
+                    "swallowed exception in %s", "_flush_audio", exc_info=True
+                )
+                continue
+            if not _mux_aac(_aus):
+                return
+        if drain:
+            # Final: the last partial frame and what the encoder holds back.
+            try:
+                _aus = aac.flush()
+            except Exception:
+                _LOGGER.debug(
+                    "swallowed exception in %s", "_flush_audio", exc_info=True
+                )
+                return
+            _mux_aac(_aus)
+
+    def _mux_aac(aus) -> bool:
+        """Mux raw AAC access units in order; False once a write failed."""
+        for au in aus:
+            pkt = av.Packet(adts_header(len(au)) + au)
+            pkt.stream = aenc
+            pkt.pts = pkt.dts = a_pts[0]
+            pkt.time_base = _AAC_TIME_BASE
+            a_pts[0] += AAC_SAMPLES_PER_FRAME
+            try:
+                out.mux(pkt)
+                progress[0] = _t.monotonic()
             except Exception:
                 mux_dead[0] = True
                 _LOGGER.debug(
                     "DTLS A/V mux: audio write failed - ending mux thread",
                     exc_info=True,
                 )
-                return
+                return False
+        return True
 
     def _dead() -> bool:
         return mux_dead[0] or wsink.failed
@@ -2140,12 +1866,6 @@ def _dtls_av_mux_run(
     if not _dead():
         _flush_video()
         _flush_audio(drain=True)  # final: pad the last partial frame so it flushes
-    try:
-        if have_audio and not _dead():
-            for opkt in aenc.encode(None):  # flush
-                out.mux(opkt)
-    except Exception:
-        _LOGGER.debug("swallowed exception in %s", "_dtls_av_mux_run", exc_info=True)
     if _dead():
         # Close the raw pipe FIRST: the container's trailer flush then fails
         # fast ("closed file") instead of hanging on the dead pipe.
@@ -2181,276 +1901,6 @@ def _h264_has_keyframe(data: bytes) -> bool:
                 continue
         i += 1
     return False
-
-
-def _mqtt_session_sync(
-    mqtt_url: str,
-    mqtt_user: str,
-    mqtt_pwd: str,
-    client_id: str,
-    subscribe_topics: list,
-    publish_items: list,
-    duration: float,
-    on_message=None,
-    ws_path: str = "/mqtt",
-    on_ready=None,
-    outgoing_queue=None,
-) -> tuple:
-    """Synchronous paho MQTT session (runs in a thread executor).
-
-    Returns (messages, status_dict) where:
-      messages    = list of (topic, payload_str) tuples received
-      status_dict = {"connected": bool, "rc": int, "rc_str": str,
-                     "error": str|None, "log": [str, ...]}
-
-    ws_path overrides the WebSocket endpoint path (default "/mqtt").
-    Pass "" or "/" to try the root path.
-
-    on_ready(status) - optional callback called after all subscribe/publish
-    operations complete but before the receive loop starts.  If it blocks
-    (e.g. waiting for user input) the paho background thread continues to
-    buffer incoming messages.  The ``duration`` countdown starts only after
-    on_ready returns, so use this hook to implement a "wait for ENTER before
-    starting the capture window" pattern.
-    """
-    import paho.mqtt.client as _paho
-    import ssl as _ssl
-    import queue as _queue
-    from urllib.parse import urlparse
-
-    parsed = urlparse(mqtt_url)
-    hostname = parsed.hostname or mqtt_url
-    port = parsed.port or (8443 if parsed.scheme in ("wss", "https") else 1883)
-    tls = parsed.scheme in ("wss", "https", "mqtts")
-    # ws_path parameter takes priority; fall back to URL path then "/mqtt"
-    path = ws_path if ws_path is not None else (parsed.path or "/mqtt")
-    if path == "":
-        path = "/"
-
-    msg_q = _queue.Queue()
-    conn_ev = threading.Event()
-    status = {
-        "connected": False,
-        "rc": None,
-        "rc_str": "",
-        "error": None,
-        "log": [],
-        "disconnected_since": None,
-    }
-
-    # Build client - handle paho >=2.0 (VERSION2) and <2.0
-    try:
-        client = _paho.Client(
-            callback_api_version=_paho.CallbackAPIVersion.VERSION2,
-            client_id=client_id,
-            transport="websockets",
-        )
-    except AttributeError:
-        client = _paho.Client(client_id=client_id, transport="websockets")
-
-    client.ws_set_options(path=path)
-    if mqtt_user:
-        client.username_pw_set(mqtt_user, mqtt_pwd or "")
-    if tls:
-        ctx = _ssl.create_default_context()
-        client.tls_set_context(ctx)
-
-    def _on_connect(c, ud, flags, reason_code, props=None):
-        # paho >=2 passes ReasonCode; paho <2 passes int
-        try:
-            rc = int(reason_code)
-        except (TypeError, ValueError):
-            rc = getattr(reason_code, "value", -1)
-        status["connected"] = rc == 0
-        status["rc"] = rc
-        status["rc_str"] = str(reason_code)
-        if rc == 0:
-            # Successful (re)connect: a prior drop (if any) has recovered, so the
-            # receive loop must not fail it fast - clear the disconnect marker.
-            status["disconnected_since"] = None
-            # (Re)subscribe on EVERY successful connect.  paho's loop_start
-            # auto-reconnects after a transient drop, but with clean_session the
-            # broker retains no subscriptions, so a reconnected client would be
-            # deaf unless they are re-established here rather than only once below.
-            for _sub in subscribe_topics:
-                try:
-                    c.subscribe(_sub)
-                except Exception:
-                    _LOGGER.debug(
-                        "_mqtt_session: resubscribe failed for %s", _sub, exc_info=True
-                    )
-        conn_ev.set()
-
-    def _on_message(c, ud, msg):
-        payload = (
-            msg.payload.decode("utf-8", errors="replace")
-            if isinstance(msg.payload, (bytes, bytearray))
-            else str(msg.payload)
-        )
-        msg_q.put((msg.topic, payload))
-
-    def _on_disconnect(c, ud, *args):
-        # paho >=2 calls (disconnect_flags, reason_code, properties); paho <2
-        # calls (rc,).  Pull the reason code from whichever slot it lands in so
-        # the log is truthful on both (a fixed 5-arg signature put paho 1.x's rc
-        # in disconnect_flags and logged reason_code as None).
-        reason_code = args[1] if len(args) >= 2 else (args[0] if args else None)
-        # If _on_connect was never fired (WebSocket upgrade failed, auth refused
-        # at TCP level, etc.) signal conn_ev now so the caller doesn't time out.
-        if not conn_ev.is_set():
-            # Never connected (WS upgrade failed, auth refused at TCP level, ...):
-            # unblock the caller and end the receive loop - the connect failed.
-            status["connected"] = False
-            status["rc_str"] = f"disconnect-before-connect rc={reason_code}"
-            conn_ev.set()
-            msg_q.put(None)  # sentinel: end the receive loop
-            return
-        # Already connected once: this is (so far) a transient drop.  paho's
-        # loop_start auto-reconnects and _on_connect re-subscribes AND clears
-        # disconnected_since, so a brief blip must NOT tear down a long-lived
-        # stream's signaling (the non-persistent transport runs one session for
-        # the whole stream).  But a drop that never recovers - session taken over
-        # (rc=142) when the account's persistent client reclaims the clientId,
-        # revoked creds, broker gone - would otherwise leave the receive loop
-        # polling a dead socket until the full duration deadline.  Record when the
-        # drop began; the loop ends the session once it has persisted past
-        # _MQTT_RECONNECT_GRACE.  (dict single-key set/get is atomic under the GIL,
-        # so no lock is needed across the paho thread and the receive loop.)
-        if status.get("disconnected_since") is None:
-            status["disconnected_since"] = time.monotonic()
-        _LOGGER.debug(
-            "_mqtt_session: disconnect rc=%s (awaiting paho reconnect)",
-            reason_code,
-        )
-
-    def _on_log(c, ud, level, buf):
-        if len(status["log"]) < 500:
-            status["log"].append(buf)
-        if "assword" not in buf:
-            _LOGGER.debug("paho: %s", buf)
-
-    client.on_connect = _on_connect
-    client.on_message = _on_message
-    client.on_disconnect = _on_disconnect
-    client.on_log = _on_log
-
-    import time as _time
-
-    try:
-        client.connect(hostname, port, keepalive=60)
-    except Exception as exc:
-        status["error"] = str(exc)
-        _LOGGER.warning("_mqtt_session: connect() raised: %s", exc)
-        return [], status
-
-    client.loop_start()
-
-    if not conn_ev.wait(timeout=15):
-        status["error"] = f"connect timeout to {hostname}:{port}"
-        _LOGGER.warning("_mqtt_session: %s", status["error"])
-        client.loop_stop()
-        try:
-            client.disconnect()
-        except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
-        return [], status
-
-    if not status["connected"]:
-        _LOGGER.warning(
-            "_mqtt_session: broker refused rc=%s (%s) for %s:%d",
-            status["rc"],
-            status["rc_str"],
-            hostname,
-            port,
-        )
-        client.loop_stop()
-        try:
-            client.disconnect()
-        except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
-        return [], status
-
-    _LOGGER.info(
-        "_mqtt_session: connected to %s:%d clientId=%s", hostname, port, client_id
-    )
-
-    # Subscriptions are (re)established in _on_connect so they survive a paho
-    # auto-reconnect; nothing to subscribe here.
-    _LOGGER.debug("_mqtt_session: subscribed (in on_connect) %s", subscribe_topics)
-
-    for pub_topic, pub_payload in publish_items:
-        client.publish(pub_topic, pub_payload)
-        _LOGGER.debug("_mqtt_session: published %s", pub_topic)
-
-    if on_ready:
-        try:
-            on_ready(status)
-        except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
-
-    collected = []
-    deadline = _time.monotonic() + duration
-    while True:
-        remaining = deadline - _time.monotonic()
-        if remaining <= 0:
-            break
-        # End the session if a post-connect drop never recovered: a terminal
-        # disconnect delivers no further messages, so without this the loop would
-        # poll a dead socket (and the caller's camera signaling would silently
-        # stall) until the full duration deadline.
-        _ds = status.get("disconnected_since")
-        if _ds is not None and (_time.monotonic() - _ds) > _MQTT_RECONNECT_GRACE:
-            _LOGGER.warning(
-                "_mqtt_session: MQTT disconnected >%.0fs with no reconnect "
-                "(rc=%s) - ending session; camera signaling can no longer arrive",
-                _MQTT_RECONNECT_GRACE,
-                status.get("rc_str"),
-            )
-            break
-        # Drain the outgoing publishes on every pass, not only when the inbox
-        # is empty: a busy account (every camera's signaling and events arrive
-        # on the wildcard subscriptions) used to starve our own sends.
-        if outgoing_queue is not None:
-            while True:
-                try:
-                    out = outgoing_queue.get_nowait()
-                except _queue.Empty:
-                    break
-                if out is None:  # stop sentinel
-                    client.loop_stop()
-                    try:
-                        client.disconnect()
-                    except Exception:
-                        _LOGGER.debug(
-                            "swallowed exception in %s", "_mqtt_session_sync", exc_info=True
-                        )
-                    return collected, status
-                pub_topic, pub_payload = out
-                client.publish(pub_topic, pub_payload)
-                _LOGGER.debug("_mqtt_session: published %s", pub_topic)
-        try:
-            item = msg_q.get(timeout=min(remaining, 0.1))
-        except _queue.Empty:
-            continue
-        if item is None:  # disconnect sentinel
-            break
-        # A caller with an on_message handler gets each message there; keeping
-        # every one for an hour-long stream session as well was unbounded
-        # growth for a result nobody read.
-        if not on_message:
-            collected.append(item)
-        if on_message:
-            try:
-                on_message(*item)
-            except Exception:
-                _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
-
-    client.loop_stop()
-    try:
-        client.disconnect()
-    except Exception:
-        _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
-    return collected, status
 
 
 class _PersistentMqtt:
@@ -2614,7 +2064,7 @@ class _PersistentMqtt:
         # A retired instance must never rebuild: retire() nulls _client, which on
         # its own would look exactly like "not started yet" and reconnect with the
         # credential the broker just refused.  Callers still holding a retired
-        # client get a clean False and fall back to a per-op session.
+        # client get a clean False, reported to their caller as an error.
         if self._retired:
             return False
         with self._lock:
@@ -2794,133 +2244,6 @@ class _PersistentMqtt:
                 c.disconnect()
             except Exception:
                 pass
-
-
-async def _mqtt_session(
-    mqtt_url: str,
-    mqtt_user: str,
-    mqtt_pwd: str,
-    client_id: str,
-    subscribe_topics: list,
-    publish_items: list,
-    duration: float,
-    on_message=None,
-    ws_path: str = "/mqtt",
-    on_ready=None,
-) -> list:
-    """Async wrapper: runs _mqtt_session_sync in a thread executor.
-
-    Returns list of (topic, payload_str) tuples.
-    """
-    messages, status = await _mqtt_session_with_status(
-        mqtt_url,
-        mqtt_user,
-        mqtt_pwd,
-        client_id,
-        subscribe_topics,
-        publish_items,
-        duration,
-        on_message,
-        ws_path,
-        on_ready,
-    )
-    if status.get("error"):
-        _LOGGER.warning("_mqtt_session failed: %s", status["error"])
-    return messages
-
-
-async def _mqtt_session_with_status(
-    mqtt_url: str,
-    mqtt_user: str,
-    mqtt_pwd: str,
-    client_id: str,
-    subscribe_topics: list,
-    publish_items: list,
-    duration: float,
-    on_message=None,
-    ws_path: str = "/mqtt",
-    on_ready=None,
-) -> tuple:
-    """Like _mqtt_session but also returns the status dict for diagnostics."""
-    import functools
-
-    loop = asyncio.get_running_loop()
-    fn = functools.partial(
-        _mqtt_session_sync,
-        mqtt_url,
-        mqtt_user,
-        mqtt_pwd,
-        client_id,
-        subscribe_topics,
-        publish_items,
-        duration,
-        on_message,
-        ws_path,
-        on_ready,
-    )
-    return await loop.run_in_executor(None, fn)
-
-
-async def _mqtt_get_playback_server_info(
-    mqtt_url: str,
-    mqtt_user: str,
-    mqtt_pwd: str,
-    device_id: str,
-    client_id: str,
-    timeout: float = 15.0,
-) -> Optional[dict]:
-    """Publish getPlaybackServerInfoReq and return the payload dict, or None.
-
-    MQTT topics from IConstants.java / MqttManage.java:
-      publish : iot/v1/s/{userId}/{service}/{method}
-      subscribe: iot/v1/cb/{deviceId}/#
-    Response arrives on iot/v1/c/{userId}/PlayBack/getPlaybackServerInfoResp
-    (or on the device callback topic).
-    """
-    user_id = mqtt_user or "0"
-    seq = str(random.randint(100000, 999999))
-    pub_topic = f"iot/v1/s/{user_id}/PlayBack/getPlaybackServerInfoReq"
-    payload = json.dumps(
-        {
-            "method": "getPlaybackServerInfoReq",
-            "service": "PlayBack",
-            "devId": device_id,
-            "srcAddr": f"0.{user_id}",
-            "seq": seq,
-            "tst": int(time.time() * 1000),
-            "payload": {},
-        }
-    )
-
-    result_holder: list = []
-
-    def _check(topic, raw):
-        try:
-            body = json.loads(raw)
-            method = body.get("method", "")
-            if "PlaybackServerInfo" not in method and "getPlaybackServer" not in method:
-                return
-            pl = body.get("payload") or body.get("data") or {}
-            if pl.get("serverIP") or pl.get("serverIp"):
-                pl["serverIP"] = pl.get("serverIP") or pl.get("serverIp")
-                result_holder.append(pl)
-        except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_check", exc_info=True)
-
-    await _mqtt_session(
-        mqtt_url,
-        mqtt_user,
-        mqtt_pwd,
-        client_id,
-        subscribe_topics=[
-            f"iot/v1/cb/{device_id}/#",
-            f"iot/v1/c/{user_id}/#",
-        ],
-        publish_items=[(pub_topic, payload)],
-        duration=timeout,
-        on_message=_check,
-    )
-    return result_holder[0] if result_holder else None
 
 
 def _ip_looks_ascii_garbled(ip_str) -> bool:
@@ -3162,6 +2485,16 @@ def avio_header(
     return _AVIO_RESP_HDR.pack(seq, command, ts_ms, length, reserved)
 
 
+def avio_frame(seq: int, command: int, payload: bytes = b"") -> bytes:
+    """One whole AVIO control frame stamped now: the header, then ``payload``.
+
+    What each transport's single sender puts on the wire. ``seq`` is the
+    caller's: the client's dSeq counter for a control command, a random one
+    for the heartbeat, as the app does.
+    """
+    return avio_header(seq, command, int(time.time() * 1000), len(payload), 0) + payload
+
+
 def ipc_envelope(
     method: str, device_id: str, user_id, numeric_uid_raw, *, seq: str, payload
 ) -> str:
@@ -3231,6 +2564,9 @@ class _AvioWaiter:
         self._match = match
         self._future = _cfutures.Future()
 
+    #: A single question leaves the router once it is answered.
+    _keeps_listening = False
+
     def _accepts(self, resp) -> bool:
         if self._match is None:
             return True
@@ -3238,6 +2574,12 @@ class _AvioWaiter:
             return bool(self._match(resp))
         except Exception:
             return False
+
+    def _finished(self) -> bool:
+        return self._future.done()
+
+    def _deliver(self, resp) -> None:
+        self._future.set_result(resp)
 
     def cancel(self) -> None:
         """Withdraw the question - used when the command could not be sent."""
@@ -3299,6 +2641,67 @@ class _AvioWaiter:
             raise
 
 
+class _AvioCollector:
+    """Every reply to one command, in arrival order, until withdrawn.
+
+    For a command answered in several pages with no further request (the SD
+    listing). One registration stands in for one waiter per page: it stays in
+    the router, takes each reply in turn, and the caller reads them off with
+    ``next()`` until the listing says it has ended - the app collects
+    LISTEVENT pages the same way, until listEventEndFlag. Replies are handed
+    over through the event loop, so it is safe to feed from the SDES bridge
+    thread. Create it on the loop that will read it.
+    """
+
+    _keeps_listening = True
+
+    def __init__(
+        self, router: "AvioResponseRouter", command: int, max_replies: int = 0
+    ) -> None:
+        self._router = router
+        self._command = command
+        self._loop = asyncio.get_running_loop()
+        # Bounded by what the reader will take; a reply past that is dropped.
+        self._replies: "asyncio.Queue[AvioResponse]" = asyncio.Queue(
+            maxsize=max_replies
+        )
+        self._closed = False
+
+    def _accepts(self, resp) -> bool:
+        return True
+
+    def _finished(self) -> bool:
+        return self._closed
+
+    def _deliver(self, resp) -> None:
+        try:
+            on_loop = asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            on_loop = False
+        if on_loop:
+            self._put(resp)
+        else:
+            self._loop.call_soon_threadsafe(self._put, resp)
+
+    def _put(self, resp) -> None:
+        try:
+            self._replies.put_nowait(resp)
+        except asyncio.QueueFull:
+            pass
+
+    async def next(self, timeout: float) -> "Optional[AvioResponse]":
+        """The next reply, or None if none arrives within ``timeout``."""
+        try:
+            return await asyncio.wait_for(self._replies.get(), timeout)
+        except TimeoutError:
+            return None
+
+    def cancel(self) -> None:
+        """Stop collecting; a later reply goes to nobody."""
+        self._closed = True
+        self._router._forget(self)
+
+
 class AvioResponseRouter:
     """Match inbound AVIO responses to the commands that asked for them.
 
@@ -3327,6 +2730,18 @@ class AvioResponseRouter:
             self._waiting.setdefault(command, []).append(waiter)
         return waiter
 
+    def collect(self, command: int, max_replies: int = 0) -> _AvioCollector:
+        """Register for every response carrying ``command`` until cancelled.
+
+        Same rule as ``expect``: register before sending. Takes its turn with
+        the single questions for that command in registration order. Holds at
+        most ``max_replies`` unread replies (0: no limit).
+        """
+        collector = _AvioCollector(self, command, max_replies)
+        with self._lock:
+            self._waiting.setdefault(command, []).append(collector)
+        return collector
+
     def dispatch(self, frame: bytes) -> bool:
         """Hand ``frame`` to whoever is waiting for it.
 
@@ -3344,24 +2759,25 @@ class AvioResponseRouter:
                 if queue:
                     # Oldest first, skipping questions already settled and
                     # any whose match turns this reply down.
-                    queue[:] = [w for w in queue if not w._future.done()]
+                    queue[:] = [w for w in queue if not w._finished()]
                     for candidate in queue:
                         if candidate._accepts(resp):
                             waiter = candidate
-                            queue.remove(candidate)
+                            if not candidate._keeps_listening:
+                                queue.remove(candidate)
                             break
                 if queue is not None and not queue:
                     self._waiting.pop(resp.command, None)
             if waiter is None:
                 return False
-            waiter._future.set_result(resp)
+            waiter._deliver(resp)
             return True
         except Exception:
             # Runs inline on the bridge's receive path; a bad frame must never
             # take the media loop down with it.
             return False
 
-    def _forget(self, waiter: "_AvioWaiter") -> None:
+    def _forget(self, waiter: "_AvioWaiter | _AvioCollector") -> None:
         with self._lock:
             queue = self._waiting.get(waiter._command)
             if not queue:
@@ -3451,20 +2867,9 @@ def build_remb(sender_ssrc: int, media_ssrcs: "list", bitrate_bps: int) -> bytes
     return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
 
 
-def decode_remb_bitrate(pkt: bytes) -> int:
-    """The bitrate a REMB packet asks for. For tests and diagnostics."""
-    # Layout: 0-3 header, 4-7 sender SSRC, 8-11 media SSRC, 12-15 "REMB",
-    # 16 num-SSRC, 17-19 exponent+mantissa, 20+ the SSRCs.
-    b = pkt[17]
-    exp = b >> 2
-    mantissa = ((b & 0x03) << 16) | (pkt[18] << 8) | pkt[19]
-    return mantissa << exp
-
-
-#: RTPFB feedback message types (RFC 4585 s6.1, RFC 5104 s4.2).
+#: RTPFB feedback message types (RFC 4585 s6.1).
 _RTPFB_PT = 205
 _FMT_NACK = 1
-_FMT_TMMBR = 3
 
 
 def build_nack(sender_ssrc: int, media_ssrc: int, lost_seqs: "list") -> bytes:
@@ -3511,67 +2916,6 @@ def build_nack(sender_ssrc: int, media_ssrc: int, lost_seqs: "list") -> bytes:
     )
     # RTCP length is in 32-bit words, minus one.
     return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
-
-
-def build_tmmbr(
-    sender_ssrc: int, media_ssrc: int, bitrate_bps: int, overhead: int = 60
-) -> bytes:
-    """A TMMBR (RFC 5104 s4.2.1) telling ``media_ssrc`` not to exceed a rate.
-
-    Distinct from REMB, which this camera was measured to ignore: REMB reports
-    an *estimate* of what the path will bear, TMMBR states a *bound* the sender
-    must respect. They are different messages and a firmware can honour one
-    without the other.
-
-    The bound is encoded as a 17-bit mantissa scaled by a 6-bit exponent, so
-    not every rate is representable. We round the mantissa DOWN, never up: a
-    TMMBR that permits more than the caller asked for is worse than sending
-    none at all on a link that is already saturating.
-
-    ``overhead`` is Measured Overhead, per-packet transport overhead in bytes
-    (9 bits). 60 is the usual IP+UDP+RTP+SRTP figure and is what browsers send.
-    """
-    if bitrate_bps <= 0:
-        raise ValueError(
-            f"a TMMBR must name a positive bitrate, got {bitrate_bps}; a bound "
-            f"of zero asks the camera to stop sending"
-        )
-    exp = 0
-    mantissa = int(bitrate_bps)
-    while mantissa >= (1 << 17):
-        mantissa >>= 1
-        exp += 1
-    fci = struct.pack(
-        "!II",
-        media_ssrc & 0xFFFFFFFF,
-        (exp << 26) | (mantissa << 9) | (max(0, overhead) & 0x1FF),
-    )
-    # The header's media-source field is unused for TMMBR and SHALL be zero
-    # (RFC 5104 s4.2.1.2); the limited SSRC travels in the FCI above.
-    pkt = (
-        struct.pack("!BBH", 0x80 | _FMT_TMMBR, _RTPFB_PT, 0)
-        + struct.pack("!II", sender_ssrc & 0xFFFFFFFF, 0)
-        + fci
-    )
-    return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
-
-
-def decode_tmmbr_bitrate(pkt: bytes) -> int:
-    """The bound carried by a TMMBR built above, in bits per second."""
-    word = struct.unpack("!I", pkt[16:20])[0]
-    return ((word >> 9) & 0x1FFFF) << (word >> 26)
-
-
-def decode_nack_seqs(pkt: bytes) -> "list":
-    """The sequence numbers a Generic NACK asks for. For tests and diagnostics."""
-    out = []
-    for off in range(12, len(pkt), 4):
-        pid, blp = struct.unpack_from("!HH", pkt, off)
-        out.append(pid)
-        for bit in range(16):
-            if blp & (1 << bit):
-                out.append((pid + bit + 1) & 0xFFFF)
-    return out
 
 
 class NackTracker:
@@ -3902,19 +3246,20 @@ class AvioRequestMixin:
         and the rest arrive with nobody waiting, so a caller saw the oldest
         255 recordings and never today's.
 
-        Every waiter is registered before the send, for the same reason as the
-        single request: the pages follow each other faster than a waiter
-        registered after the first reply could catch the second. Collection
-        stops at the first wait that times out (``timeout`` for the first
-        reply, ``more_timeout`` after it), at ``max_replies``, once ``budget``
-        seconds have passed since the send, or as soon as ``done(replies)`` is
-        true. An empty list means nothing came back.
+        One collector is registered before the send, for the same reason as
+        the single request: the pages follow each other faster than a
+        registration made after the first reply could catch the second.
+        Collection stops at the first wait that times out (``timeout`` for the
+        first reply, ``more_timeout`` after it), at ``max_replies``, once
+        ``budget`` seconds have passed since the send, or as soon as
+        ``done(replies)`` is true - for the listing, its end flag. An empty
+        list means nothing came back.
 
         Replies are matched on ``response_cmd`` alone, so two of these for the
         same command at once on one session can take each other's replies.
         """
-        router = self._avio_responses
-        waiters = [router.expect(response_cmd) for _ in range(max(1, max_replies))]
+        max_replies = max(1, max_replies)
+        pages = self._avio_responses.collect(response_cmd, max_replies)
         replies: "list[AvioResponse]" = []
         try:
             try:
@@ -3925,23 +3270,22 @@ class AvioRequestMixin:
                 return replies
             loop = asyncio.get_running_loop()
             give_up = None if budget is None else loop.time() + budget
-            for waiter in waiters:
+            while len(replies) < max_replies:
                 wait = more_timeout if replies else timeout
                 if give_up is not None:
                     wait = min(wait, give_up - loop.time())
                     if wait <= 0:
                         break
-                resp = await waiter.result(wait)
+                resp = await pages.next(wait)
                 if resp is None:
                     break
                 replies.append(resp)
                 if done is not None and done(replies):
                     break
         finally:
-            # The ones never reached are still registered; a stray later reply
-            # must go to nobody rather than to a question long since answered.
-            for waiter in waiters:
-                waiter.cancel()
+            # A stray later reply must go to nobody rather than to a question
+            # long since answered.
+            pages.cancel()
         return replies
 
 

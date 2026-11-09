@@ -10,7 +10,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot_cameras.camera.go2rtc import Go2rtcClient, prefer_go2rtc
+from aidot_cameras.camera.go2rtc import (
+    PLACEHOLDER_SOURCE,
+    EnsureOutcome,
+    Go2rtcClient,
+    async_ensure_stream,
+    async_remove_stream,
+    prefer_go2rtc,
+)
 
 
 class _Resp:
@@ -280,3 +287,143 @@ def test_writes_to_different_go2rtc_servers_do_not_queue_on_each_other():
 
     asyncio.run(run())
     assert s.max_writes_in_flight == 2
+
+
+# --- async_ensure_stream / async_remove_stream: the one locked write path ---
+
+_API = "http://127.0.0.1:1984"
+
+
+def _seq(s):
+    """The calls as (method, stream name) - what go2rtc sees, in order."""
+    out = []
+    for method, _url, params in s.calls:
+        if isinstance(params, dict):
+            out.append((method, params.get("src")))
+        elif params:
+            out.append((method, dict(params).get("name")))
+        else:
+            out.append((method, None))
+    return out
+
+
+def test_ensure_sends_one_put_with_the_source():
+    s = _FakeSession()
+    r = asyncio.run(async_ensure_stream(Go2rtcClient(s, _API), "cam", "rtsp://x/y"))
+    assert r.outcome is EnsureOutcome.REGISTERED and r.ok
+    assert s.calls == [
+        ("PUT", f"{_API}/api/streams", [("name", "cam"), ("src", "rtsp://x/y")])
+    ]
+
+
+def test_ensure_without_a_source_defines_the_placeholder():
+    s = _FakeSession()
+    asyncio.run(async_ensure_stream(Go2rtcClient(s, _API), "cam"))
+    assert s.calls[0][2] == [("name", "cam"), ("src", PLACEHOLDER_SOURCE)]
+
+
+def test_recreate_is_delete_then_put():
+    s = _FakeSession()
+    r = asyncio.run(
+        async_ensure_stream(Go2rtcClient(s, _API), "cam", "rtsp://x/y", recreate=True)
+    )
+    assert r.outcome is EnsureOutcome.REGISTERED
+    assert _seq(s) == [("DELETE", "cam"), ("PUT", "cam")]
+
+
+def test_a_rejected_put_with_the_stream_present_is_unchanged():
+    # go2rtc with a duplicate key in its config answers every PUT with 400
+    # while the streams stay registered: that is not a failure to serve.
+    s = _FakeSession(put_status=400, streams={"cam": {"producers": []}})
+    r = asyncio.run(async_ensure_stream(Go2rtcClient(s, _API), "cam", "rtsp://x/y"))
+    assert r.outcome is EnsureOutcome.UNCHANGED and r.ok
+    assert _seq(s) == [("PUT", "cam"), ("GET", None)]
+
+
+def test_a_rejected_put_with_the_stream_absent_fails():
+    s = _FakeSession(put_status=500)
+    r = asyncio.run(async_ensure_stream(Go2rtcClient(s, _API), "cam", "rtsp://x/y"))
+    assert r.outcome is EnsureOutcome.FAILED and not r.ok
+
+
+def test_an_unreachable_go2rtc_fails_without_raising():
+    s = _FakeSession(raise_on={"put", "get"})
+    r = asyncio.run(async_ensure_stream(Go2rtcClient(s, _API), "cam", "rtsp://x/y"))
+    assert r.outcome is EnsureOutcome.FAILED
+
+
+def test_concurrent_ensures_on_one_server_run_one_after_the_other():
+    # The DELETE-then-PUT that rebuilds a stream must be atomic: another
+    # caller's write landing between the two would re-create the definition
+    # the first is replacing, or tear go2rtc's config file. Holds across
+    # client objects. The GET that settles a rejected PUT is a read and runs
+    # after the lock is released, so it may land beside the next write.
+    s = _FakeSession(write_delay=0.02, put_status=400, streams={"a": {}, "b": {}})
+
+    async def run():
+        a, b = Go2rtcClient(s, _API), Go2rtcClient(s, _API + "/")
+        return await asyncio.gather(
+            async_ensure_stream(a, "a", "rtsp://x/a", recreate=True),
+            async_ensure_stream(b, "b", "rtsp://x/b", recreate=True),
+            async_remove_stream(a, "c"),
+        )
+
+    ra, rb, removed = asyncio.run(run())
+    assert ra.outcome is rb.outcome is EnsureOutcome.UNCHANGED and removed
+    assert [c for c in _seq(s) if c[0] != "GET"] == [
+        ("DELETE", "a"),
+        ("PUT", "a"),
+        ("DELETE", "b"),
+        ("PUT", "b"),
+        ("DELETE", "c"),
+    ]
+    assert [c for c in _seq(s) if c[0] == "GET"] == [("GET", None)] * 2
+    assert s.max_writes_in_flight == 1
+
+
+def test_the_settling_get_runs_with_the_lock_released():
+    s = _FakeSession(put_status=400, streams={"cam": {}})
+    c = Go2rtcClient(s, _API)
+    held = []
+    real_get = c._get
+
+    async def spy_get():
+        held.append(c._write_lock().locked())
+        return await real_get()
+
+    c._get = spy_get
+    r = asyncio.run(async_ensure_stream(c, "cam", "rtsp://x/y"))
+    assert r.outcome is EnsureOutcome.UNCHANGED and held == [False]
+
+
+def test_ensures_on_different_servers_do_not_queue_on_each_other():
+    s = _FakeSession(write_delay=0.02)
+
+    async def run():
+        await asyncio.gather(
+            async_ensure_stream(Go2rtcClient(s, _API), "a", "rtsp://x/a"),
+            async_ensure_stream(Go2rtcClient(s, "http://127.0.0.1:1985"), "b", "s"),
+        )
+
+    asyncio.run(run())
+    assert s.max_writes_in_flight == 2
+
+
+def test_prefer_go2rtc_goes_through_the_locked_call():
+    # Standalone registration (_register_with_go2rtc -> prefer_go2rtc) and the
+    # Home Assistant integration share one write path and one lock.
+    s = _FakeSession(write_delay=0.02)
+
+    async def run():
+        c = Go2rtcClient(s, _API)
+        await asyncio.gather(
+            async_ensure_stream(c, "a", "rtsp://x/a", recreate=True),
+            prefer_go2rtc(s, "b", "rtsp://x/b", base_url=_API),
+        )
+
+    asyncio.run(run())
+    assert [c for c in _seq(s) if c[0] != "GET"] == [
+        ("DELETE", "a"),
+        ("PUT", "a"),
+        ("PUT", "b"),
+    ]

@@ -141,6 +141,7 @@ def _open_self(refused):
         return None
 
     return types.SimpleNamespace(
+        _mqtt_client_id=lambda: None,
         _mqtt_credentials=_creds,
         _async_get_mqtt_url=_url,
         user_id=1,

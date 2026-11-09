@@ -6,16 +6,20 @@ so a consumer that joins a running stream gets audio 0.1-0.75 s behind the
 picture, a different amount each time (measured 2026-10-03). The TS written here
 carries one clock for both tracks, so any joiner stays in step.
 
-Joining is the delicate part, learned on ``_DirectTsServer`` (protocol.py): a
+Joining is the delicate part, learned on the DTLS pull serve's first server: a
 consumer that starts mid-GOP references parameter sets it never received and
 gets no picture. So the last PAT and PMT are cached, and a new consumer is held
 until the writer signals a keyframe (``mark_keyframe``); it then receives the
 tables followed by media from that keyframe on.
 
-Unlike ``_DirectTsServer`` this serves several consumers at once, and none can
-hold up the writer or another consumer: each has its own bounded buffer and
-sender thread. A consumer that falls more than ``MAX_BUFFER`` behind is put back
-to "wait for the next keyframe" rather than slowing anything down.
+Several consumers are served at once, and none can hold up the writer or
+another consumer: each has its own bounded buffer and sender thread. A consumer
+that falls more than ``MAX_BUFFER`` behind is put back to "wait for the next
+keyframe" rather than slowing anything down.
+
+``TsServer`` serves one camera's channel on the port its consumer was told (a
+DTLS camera's ``http://`` pull serve); ``TsRouter`` serves every camera's
+in-sync HLS TS from one port, by path.
 """
 
 from __future__ import annotations
@@ -113,10 +117,9 @@ class TsChannel:
                     chunk = c.chunks.popleft()
                     c.queued -= len(chunk)
             if chunk is None:
-                # Nothing to send: is the consumer still there? A send failure
-                # used to be the only sign it had gone, so with no writes a
-                # departed consumer stayed counted - a "viewer" keeping the
-                # camera awake - for as long as the stream was quiet.
+                # Nothing to send: is the consumer still there? Without this
+                # check, while the stream is quiet a departed consumer would
+                # stay counted - a "viewer" keeping the camera awake.
                 if _peer_gone(c.sock):
                     break
                 continue
@@ -220,6 +223,13 @@ class TsChannel:
     def flush(self) -> None:
         return None
 
+    def new_stream(self) -> None:
+        """The writer starts a new MPEG-TS stream (a new muxer): forget the
+        old one's partial packet, tables and keyframe signal."""
+        self._tail = b""
+        self._pat = self._pmt = self._pmt_pid = None
+        self._kf_pending = False
+
     def disconnect_all(self) -> int:
         """Disconnect every consumer now; new ones are still accepted. Returns
         how many were connected."""
@@ -269,7 +279,174 @@ class TsChannel:
             self._drop(c)
 
 
-class TsRouter:
+class _TsListener:
+    """A loopback listener that hands each accepted connection to
+    ``_handshake`` on its own thread. Subclasses resolve the request to a
+    channel and answer it."""
+
+    #: Prefix of the threads' names and of the log lines.
+    _NAME = "ts-listener"
+    _BACKLOG = 8
+
+    def __init__(self, port: int, *, host: str = "127.0.0.1") -> None:
+        self._port = port
+        self._host = host
+        self._listen: Optional[socket.socket] = None
+        self._closed = threading.Event()
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    def start(self) -> None:
+        """Bind and begin accepting. Raises OSError when the port is taken."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((self._host, self._port))
+            s.listen(self._BACKLOG)
+        except OSError:
+            _close(s)
+            raise
+        s.settimeout(0.5)
+        self._port = s.getsockname()[1]
+        self._listen = s
+        threading.Thread(
+            target=self._accept_loop, name=f"{self._NAME}-accept", daemon=True
+        ).start()
+
+    def _accept_loop(self) -> None:
+        listen = self._listen
+        while not self._closed.is_set():
+            try:
+                cli, _ = listen.accept()  # type: ignore[union-attr]
+            except TimeoutError:
+                continue
+            except OSError:
+                if self._closed.is_set():
+                    return
+                # EMFILE, ECONNABORTED, ...: transient. Returning here would
+                # stop the listener for the life of the process.
+                _LOGGER.debug("%s: accept failed", self._NAME, exc_info=True)
+                self._closed.wait(0.1)
+                continue
+            threading.Thread(
+                target=self._handshake,
+                args=(cli,),
+                name=f"{self._NAME}-hs",
+                daemon=True,
+            ).start()
+
+    def _handshake(self, cli: socket.socket) -> None:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        self._closed.set()
+        if self._listen is not None:
+            _close(self._listen)
+            self._listen = None
+
+
+class TsServer(_TsListener):
+    """One camera's pull serve: its ``TsChannel`` on the port go2rtc dials.
+
+    It is bound when the camera starts streaming and held until it stops, so
+    a consumer that dials during the camera's handshake (an eager go2rtc pull,
+    16-25 s before the first frame) connects and waits instead of being
+    refused. Its HTTP response is held until a mux is writing (``open``),
+    and media then starts at the next keyframe, after the channel's tables.
+
+    Each mux (one per serve cycle) writes through its own ``open()`` sink.
+    Closing that sink disconnects the consumers that were sent its media - a
+    new mux starts a new stream, which they could not decode on from where
+    they were - and keeps the ones still waiting for a keyframe.
+    """
+
+    #: How long a consumer may wait for a mux before it is closed.
+    READY_TIMEOUT_S = 90.0
+
+    _NAME = "ts-serve"
+
+    def __init__(self, port: int, *, host: str = "127.0.0.1") -> None:
+        super().__init__(port, host=host)
+        self.channel = TsChannel("/")
+        self._live = threading.Event()
+        self._sink: Optional["_CycleSink"] = None
+
+    def open(self) -> "_CycleSink":
+        """The sink for one mux; consumers are answered from now on.
+
+        Binds first if ``start`` has not (or failed to): raises OSError when
+        the port is taken."""
+        if self._listen is None and not self._closed.is_set():
+            self.start()
+        if self._sink is not None:
+            self._sink.close()
+        self.channel.new_stream()
+        self._sink = _CycleSink(self)
+        self._live.set()
+        return self._sink
+
+    def _detach(self, sink: "_CycleSink") -> None:
+        if self._sink is sink:
+            self._sink = None
+            self._live.clear()
+            self.channel.disconnect_started()
+
+    def _handshake(self, cli: socket.socket) -> None:
+        try:
+            cli.settimeout(5.0)
+            cli.recv(4096)  # the request line and headers; any path is served
+            deadline = self.READY_TIMEOUT_S
+            while not self._live.wait(min(0.5, deadline)):
+                deadline -= 0.5
+                if self._closed.is_set() or deadline <= 0 or _peer_gone(cli):
+                    _close(cli)
+                    return
+            if self._closed.is_set():
+                _close(cli)
+                return
+            cli.sendall(_HTTP_OK)
+            cli.settimeout(None)
+        except OSError:
+            _close(cli)
+            return
+        self.channel.add_consumer(cli)
+
+    def close(self) -> None:
+        self._closed.set()
+        self._live.clear()
+        super().close()
+        self.channel.close()
+
+
+class _CycleSink:
+    """One mux's view of a ``TsServer``: writes after ``close`` are refused, so
+    a mux that outlives its cycle cannot write into the next one's stream."""
+
+    def __init__(self, server: TsServer) -> None:
+        self._server = server
+        self.closed = False
+
+    def write(self, b) -> int:
+        if self.closed:
+            raise OSError("serve cycle ended")
+        return self._server.channel.write(b)
+
+    def flush(self) -> None:
+        return None
+
+    def mark_keyframe(self) -> None:
+        if not self.closed:
+            self._server.channel.mark_keyframe()
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._server._detach(self)
+
+
+class TsRouter(_TsListener):
     """One loopback listener for every camera, routed by request path.
 
     A per-camera port could collide (two cameras hashing to one port served one
@@ -281,9 +458,11 @@ class TsRouter:
     ``url``); anything else gets the same 404 as an unknown path.
     """
 
+    _NAME = "ts-router"
+    _BACKLOG = 16
+
     def __init__(self, port: int = 0, *, host: str = "127.0.0.1") -> None:
-        self._port = port
-        self._host = host
+        super().__init__(port, host=host)
         #: A secret for this listener. It is loopback-only, but anything else on
         #: the host (an add-on sharing the host network) could otherwise read a
         #: camera's video from its port and its well-known stream name. It goes
@@ -291,14 +470,8 @@ class TsRouter:
         #: ERROR when it cannot open it) and masks an ``auth`` query parameter
         #: there, but nothing in the path. Never logged here.
         self.token = secrets.token_urlsafe(18)
-        self._listen: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._channels: dict = {}
-        self._closed = threading.Event()
-
-    @property
-    def port(self) -> int:
-        return self._port
 
     def url(self, path: str) -> str:
         """The URL a consumer reads ``path`` from, with the listener's secret."""
@@ -308,18 +481,6 @@ class TsRouter:
         given = parse_qs(query).get("auth", [""])[0]
         return hmac.compare_digest(given.encode(), self.token.encode())
 
-    def start(self) -> None:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((self._host, self._port))
-        s.listen(16)
-        s.settimeout(0.5)
-        self._port = s.getsockname()[1]
-        self._listen = s
-        threading.Thread(
-            target=self._accept_loop, name="ts-router-accept", daemon=True
-        ).start()
-
     def channel(self, path: str) -> TsChannel:
         """The channel for ``path`` (``/<name>.ts``), created on first use."""
         with self._lock:
@@ -327,24 +488,6 @@ class TsRouter:
             if ch is None:
                 ch = self._channels[path] = TsChannel(path)
             return ch
-
-    def _accept_loop(self) -> None:
-        while not self._closed.is_set():
-            try:
-                cli, _ = self._listen.accept()
-            except TimeoutError:
-                continue
-            except OSError:
-                if self._closed.is_set():
-                    return
-                # EMFILE, ECONNABORTED, ...: transient. Returning here used to
-                # stop every camera's TS for the life of the process.
-                _LOGGER.debug("ts-router: accept failed", exc_info=True)
-                self._closed.wait(0.1)
-                continue
-            threading.Thread(
-                target=self._handshake, args=(cli,), name="ts-router-hs", daemon=True
-            ).start()
 
     def _handshake(self, cli: socket.socket) -> None:
         try:
@@ -367,9 +510,7 @@ class TsRouter:
         ch.add_consumer(cli)
 
     def close(self) -> None:
-        self._closed.set()
-        if self._listen is not None:
-            _close(self._listen)
+        super().close()
         with self._lock:
             channels = list(self._channels.values())
         for ch in channels:

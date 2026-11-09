@@ -119,7 +119,9 @@ def test_every_variable_the_source_reads_is_registered():
 
 
 def test_every_registered_variable_is_read_somewhere():
-    unused = sorted(set(settings.KNOBS) - _source_names())
+    # A deprecated knob is read only by settings.warn_deprecated_once.
+    live = {n for n, k in settings.KNOBS.items() if not k.deprecated}
+    unused = sorted(live - _source_names())
     assert not unused, f"registered but read nowhere: {unused}"
 
 
@@ -345,7 +347,7 @@ def test_read_by_name_uses_the_registry_and_an_injected_env(monkeypatch):
     [("0", 0.1), ("-3", 0.1), ("0.01", 0.1), ("nan", 5.0), ("0.5", 0.5), ("5", 5.0)],
 )
 def test_the_slow_probe_step_cannot_be_zero(raw, expected):
-    """``_slow_probe_sleep`` sleeps in steps of this size until its interval
+    """``_chunked_wait`` sleeps in steps of this size until its interval
     is up; a step of 0 or less made it spin on ``asyncio.sleep(0)``."""
     env = {"AIDOT_DTLS_SLOW_PROBE_CHUNK_S": raw}
     assert settings.read("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", env) == expected
@@ -366,8 +368,8 @@ def test_import_time_constants_come_from_the_registry():
     from aidot_cameras.camera import protocol, sdes_open
 
     assert camera_client._BUSY_BACKOFF_S == settings.default("AIDOT_BUSY_BACKOFF_S")
-    assert camera_client._SLOW_PROBE_THRESHOLD == settings.default(
-        "AIDOT_DTLS_SLOW_PROBE_THRESHOLD"
+    assert camera_client._WAIT_CHUNK_S == settings.default(
+        "AIDOT_DTLS_SLOW_PROBE_CHUNK_S"
     )
     assert camera_client._SERVE_REORDER_QUEUE == settings.default(
         "AIDOT_SERVE_REORDER_QUEUE"
@@ -378,7 +380,9 @@ def test_import_time_constants_come_from_the_registry():
     assert sdes_open._BATTERY_STALE_OFFER_GRACE_S == settings.default(
         "AIDOT_BATTERY_STALE_OFFER_GRACE_S"
     )
-    assert sdes_open._TRIGGER_GRACE_S == settings.default("AIDOT_SDES_TRIGGER_GRACE_S")
+    assert sdes_open._NO_MEDIA_GRACE_S == settings.default(
+        "AIDOT_SDES_NO_MEDIA_GRACE_S"
+    )
     assert lan_retry._LOGIN_RETRY_LIMIT == settings.default("AIDOT_LOGIN_RETRY_LIMIT")
     assert protocol.REMB_TARGET_BPS == settings.default("AIDOT_REMB_TARGET_BPS")
 
@@ -508,3 +512,25 @@ def test_tristate_reader():
         settings.tristate("AIDOT_NOT_A_KNOB", {})
     with pytest.raises(ValueError):
         settings.tristate("AIDOT_HEALTH_LINE_S", {})
+
+
+def test_a_deprecated_knob_says_what_replaced_it_and_has_no_value():
+    deprecated = [k for k in settings.KNOBS.values() if k.deprecated]
+    assert len(deprecated) == 8
+    for knob in deprecated:
+        assert knob.default is None and knob.kind == "str", knob.name
+
+
+def test_each_deprecated_knob_warns_once_by_name(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(settings, "_deprecated_warned", set())
+    env = {"AIDOT_SDES_ECHO_WAIT_S": "2", "AIDOT_PERSISTENT_MQTT": "0"}
+    with caplog.at_level(logging.WARNING, logger=settings._LOGGER.name):
+        settings.warn_deprecated_once(env)
+        settings.warn_deprecated_once(env)
+        settings.warn_deprecated_once({"AIDOT_SDES_ECHO_WAIT_S": ""})
+    lines = sorted(r.getMessage() for r in caplog.records)
+    assert len(lines) == 2
+    assert lines[0].startswith("AIDOT_PERSISTENT_MQTT is deprecated and ignored: ")
+    assert lines[1].startswith("AIDOT_SDES_ECHO_WAIT_S is deprecated and ignored: ")

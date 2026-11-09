@@ -96,17 +96,18 @@ don't have to be re-discovered):
   via ICE; treat these as transient and proceed rather than aborting. A camera
   already at its viewer limit returns a terminal ack (`-50002` / `-50015`) -
   see the busy handling below.
-- **SDES role-reversal (A001064 PTZ):** this model echoes our offer back as its
-  own `webrtcReq` *before* doing ICE, so it must be armed before our `webrtcReq`
-  is sent. The `sdes_fast_liveplay` optimisation sends `webrtcReq` ~4.5 s earlier
-  and breaks this model specifically, so A001064 is excluded from that flag
-  (`_NO_FAST_LIVEPLAY_MODELS`).
+- **A001064 PTZ keeps the livePlay waits:** it must be armed before our
+  `webrtcReq` is sent. The `sdes_fast_liveplay` optimisation sends `webrtcReq`
+  ~4.5 s earlier and dropped this model's media in a live A/B, so A001064 is
+  excluded from that flag (`_NO_FAST_LIVEPLAY_MODELS`). It was once thought to
+  echo our offer back and need a `webrtcResp` from us; that was never seen in
+  the field, the official app sends none, and the library no longer does.
 
 The `livePlayResp` wait returns as soon as the response arrives; its timeout is
 only paid when the camera never answers. `sdes_fast_liveplay`
 (`AIDOT_SDES_FAST_LIVEPLAY` env / `sdes_fast_liveplay=` kwarg) skips this wait and
 goes straight to webrtcReq/ICE - **on by default**, matching the official app
-(which never waits for `livePlayResp`). Role-reversal models (A001064) are always
+(which never waits for `livePlayResp`). A001064 is always
 excluded. Disable with `AIDOT_SDES_FAST_LIVEPLAY` in `{0,false,no,off}`.
 
 ### Battery cameras and the first open
@@ -133,11 +134,12 @@ opening a session until the device reports itself awake.
 - **A stalled attempt is abandoned to the retry.**
   `AIDOT_BATTERY_STALE_OFFER_GRACE_S` (15 s, `0` disables) ends the first-media
   wait early when the camera turned up mid-wait and still sent nothing, rather
-  than holding the full 75 s. `AIDOT_SDES_ANSWER_PROBE_GRACE_S` and
-  `AIDOT_SDES_TRIGGER_GRACE_S` (20 s each, 1.0.0rc45) cover two further SDES
-  shapes - the camera answered and never sent a STUN probe, or LIVING went out
-  on a path it answered and neither an ack nor media followed - both timed from
-  the answer, never the open, so a camera still waking is not clipped. See
+  than holding the full 75 s. `AIDOT_SDES_NO_MEDIA_GRACE_S` (20 s) is the
+  other timer: no media 20 s after the camera's answer ends the attempt,
+  whatever the shape - the camera never sent a STUN probe, nothing answered the
+  candidate we nominated, or LIVING went out and neither an ack nor media
+  followed. It is timed from the answer, never the open, so a camera still
+  waking is not clipped, and the stall WARNING names the shape. See
   [`ENVIRONMENT.md`](ENVIRONMENT.md) for the exact conditions.
 
 None of this wakes a camera that nobody is watching. Snapshots for a dashboard
@@ -182,7 +184,7 @@ An adaptive "fast first, then patient" keepalive strategy and a separate
 skip-TURN switch were tried here and removed in 1.0.0rc44: the fast failure
 cost ~40 s against a ~7 s saving, and the connection mode covers the LAN case.
 
-### Connection reuse (`AIDOT_PERSISTENT_MQTT`, on by default)
+### Connection reuse (one persistent MQTT connection)
 
 Historically every device command, attribute fetch, and **stream open** opened
 and tore down its own cloud MQTT WebSocket. The official app instead keeps ONE
@@ -193,9 +195,15 @@ only be one), subscribes once, replays subscriptions on reconnect, and carries
 commands, attributes, AND the stream-open signaling - without tearing down on
 stream stop. This removes the per-open connect churn that otherwise rate-limits
 the cloud account; live 7-camera soaks showed SDES `NO_MEDIA` dropping from
-~57 % to ~11-19 % with the flag on. On by default; disable with `AIDOT_PERSISTENT_MQTT`
-in `{0,false,no,off}` or per-camera `_persistent_mqtt_opt=False` (the explicit opt
-always wins).
+~57 % to ~11-19 % with it.
+
+It is the only MQTT transport. The per-operation connection, and the fallback
+to it when the shared connection failed, connected with the same `client_id`,
+so the broker evicted the shared connection every time it ran; both are gone.
+An operation that finds no shared connection reports failure instead.
+`AIDOT_PERSISTENT_MQTT`, which used to turn the shared connection off, is still
+accepted and ignored; set to `0`/`false`/`no`/`off` it logs one deprecation
+warning.
 
 **Persisting `login_info` yourself?** This connection (and its guarding lock)
 live on the same `login_info` dict `AidotClient` hands you - a live
@@ -212,28 +220,34 @@ socket). The library forces `USE-CANDIDATE` onto the highest remote port, which
 lifts the per-attempt connect rate from ~25% to ~75-87%. The fix is **scoped to
 DTLS-camera connections only** - SDES cameras and non-camera devices are a strict
 no-op. Combined with the keepalive loop's retries (a jittered exponential
-backoff from 5 s to 300 s, with opens spaced at least `AIDOT_DTLS_RETRY_GATE_S`
+backoff from 15 s to 600 s, with opens spaced at least `AIDOT_DTLS_RETRY_GATE_S`
 apart) the effective connect rate is high. The fix is unconditional (it self-gates to
 A000088 DTLS connections, so it is a strict no-op everywhere else).
 
 Since 1.0.0rc71 a served DTLS session that ends on its own within
 `AIDOT_DTLS_SHORT_SESSION_S` (30 s) of opening, or never delivers video, is a
-short session and is paced on its own backoff (30 s, then 30-45 s), not
-reopened on the bare 15 s gate. Since 1.0.0rc72 a session the camera closes
-itself (a DTLS close_notify) after delivering video and living at least 10 s
-is not short: viewed from outside its network an A000088 closes about one
-session in three 19.5-20.4 s after the handshake, and the serve reopens it at
-once (logged as "camera ... closed its session"), up to three in a row. And after an open whose ICE never connected
-(`AidotIceNotEstablished`) the next serve-loop open waits at least
+failed session and is paced on its own backoff (30 s, then 30-45 s), not
+reopened on the bare 15 s gate; after `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` (5) in a
+row the serve goes dormant until a fresh live view reopens it (the count is
+kept on the camera, so one still failing goes dormant again after one more
+failed session). A session the camera closes itself (a DTLS close_notify)
+after delivering video and living at least 10 s is not a failure: viewed from
+outside its network an A000088 closes about one session in three 19.5-20.4 s
+after the handshake, and the serve reopens it at once (logged as "camera ...
+closed its session"), up to three in a row. Failed opens are paced on one backoff from 15 s up to 600 s,
+540-600 s at the cap; a camera the cloud reports offline waits the 600 s at
+once, ending early once it is back. A not-ready answer (encoder still cold)
+first gets four quick 3 s retries. After an open whose ICE never
+connected (`AidotIceNotEstablished`) the next serve-loop open waits at least
 `AIDOT_BUSY_RETRY_S` (45 s), since the camera still holds the session it
 accepted and refuses a sooner retry as busy. Hammering an A000088 like that is
 what can wedge its DTLS stack.
 
 If a camera is already serving its maximum number of viewers it returns a
 terminal ack (`-50002` / `-50015`); the open raises `AidotCameraBusy` rather
-than retrying at once. The DTLS serve loop then retries after
-`AIDOT_BUSY_RETRY_S` (45 s) and the SDES keepalive after `AIDOT_BUSY_BACKOFF_S`
-(20 s), so the camera can release the sessions it holds.
+than retrying at once. The DTLS serve loop then retries after a flat
+`AIDOT_BUSY_RETRY_S` (45 s) that leaves its backoff alone, and the SDES keepalive after
+`AIDOT_BUSY_BACKOFF_S` (20 s), so the camera can release the sessions it holds.
 
 ### The SDP handed to ffmpeg carries ONE codec
 
@@ -266,7 +280,9 @@ ran; its absence is the fault.
 
 Direct publish (on unless `AIDOT_DIRECT_PUBLISH=0`) replaces the serve's ffmpeg
 with an RTSP publisher inside the library, for a live `rtsp://` push only (recordings, snapshots, `-`
-and `http://` serves are unchanged). Design, measurements and rollout:
+and `http://` serves are unchanged). A DTLS push is published this way whatever
+the switch says: its ffmpeg push transcoded the mux's AAC back to A-law, which
+the publish already carries as the camera's own. Design, measurements and rollout:
 [`DESIGN-direct-publish.md`](DESIGN-direct-publish.md).
 
 - **SDES.** The bridge still decrypts and forwards plain RTP to the two loopback
@@ -326,8 +342,8 @@ re-sent frames dropped, N filter resets, AAC N frames / N s / N
 silence-filled / N trimmed / N re-anchors, AAC start aligned +N ms` when it
 stops (the AAC suffix is omitted when the track is off or unavailable). The
 aligned figure is `aac_align_ms` in `publish_stats()` (signed ms); the DTLS
-path puts the same key in its result and ends its own `DTLS direct
-publish: AAC ...` line with the same `AAC start aligned +N ms`. On a
+path puts the same key in its result and logs the same AAC summary in its
+own `DTLS direct publish: AAC N frames / ...` line. On a
 healthy LAN
 `late` and `lost` are 0; the repair count is normally 0 or near it; a steered
 snap or a filter reset adds one. `re-sent frames dropped` counts the
@@ -470,8 +486,8 @@ its previous behaviour, which is every relay-path battery camera measured.
 The **`webrtcReq`-echo wait** was a flat 2.0 s for role-reversal models. Across
 18 h of one deployment, of 61 SDES opens the 17 that took the wait timed out 17
 times out of 17, and the `webrtcResp` it exists to build was never sent once.
-See `AIDOT_SDES_ECHO_WAIT_S` in [`ENVIRONMENT.md`](ENVIRONMENT.md) for how it is sized now and what
-happens on a fleet whose echo band is not empty.
+It was cut to 0.25 s, and is now gone along with the `webrtcResp` itself: the
+official app never sends one on SDES.
 
 Battery models take neither wait; their cold open is dominated by the camera
 waking, and is unchanged.
@@ -673,9 +689,7 @@ would discard unrouted - are taken raw at its RTP router (`RtpRouter.raw_tap`
 in the vendored aiortc), assembled into access units and recorded as HEVC.
 The recorder's video codec is set by the recording's first keyframe, so an
 H264 recording (camera encoder setting 2) is recorded as H264 from aiortc's
-own track. There is no `on_frame` decode and no serve on this path. A camera
-flagged SDES that answers only DTLS falls back to this path, still asking for
-the recording (1.0.0rc64). A frame that lost a packet the camera did not resend
+own track. There is no `on_frame` decode and no serve on this path. A frame that lost a packet the camera did not resend
 is handed on with what arrived, for the decoder to conceal, rather than
 dropped (1.0.0rc66; `H265AccessUnits(keep_damaged=False)` drops it). On an
 A000088 the answer's extra video section names H265 on PT 0. Played on a

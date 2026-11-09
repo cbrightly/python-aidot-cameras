@@ -14,11 +14,17 @@ go2rtc REST API (v1.x), verified against go2rtc 1.9.9:
 ``PUT /api/streams?name=&src=``   add / replace a stream (200)
 ``DELETE /api/streams?src=<name>``  remove a stream (200)
 ==========================  ============================================
+
+Every write a caller makes should go through :func:`async_ensure_stream` and
+:func:`async_remove_stream`: they hold the one per-server write lock and, for
+a registration, settle what a rejected PUT means.
 """
 
 import asyncio
+import enum
 import logging
 import weakref
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 import aiohttp
@@ -32,6 +38,22 @@ _WRITE_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, as
 # go2rtc is co-located with Home Assistant by default; HA exposes its API here.
 DEFAULT_BASE_URL = "http://127.0.0.1:1984"
 DEFAULT_RTSP_PORT = 8554
+
+#: The source a stream is defined with when its media will be PUBLISHED into
+#: go2rtc rather than pulled by it. go2rtc will not hold a stream with no
+#: source and refuses a publish into a name it does not know, so the definition
+#: needs SOMETHING before the ANNOUNCE. Port 1 cannot be bound without root and
+#: refuses instantly, so go2rtc dialling it while no publisher is attached gives
+#: the viewer an error at once, never another process's media.
+PLACEHOLDER_SOURCE = "rtsp://127.0.0.1:1/aidot-placeholder"
+
+
+def _server_lock(base_url: str) -> asyncio.Lock:
+    locks = _WRITE_LOCKS.setdefault(asyncio.get_running_loop(), {})
+    lock = locks.get(base_url)
+    if lock is None:
+        lock = locks[base_url] = asyncio.Lock()
+    return lock
 
 
 class Go2rtcClient:
@@ -62,15 +84,12 @@ class Go2rtcClient:
         which go2rtc rejects every later write with 400 until the file is fixed
         by hand (18 of 40 bursts of 15 PUTs over 5 names corrupted the file,
         2026-10-08). So writes to one server are queued, across client objects.
+
+        Not re-entrant: the public writers take it once around one unlocked
+        primitive (``_put``, ``_delete``), and :func:`async_ensure_stream`
+        takes it once around several. Reads (``_get``) never take it.
         """
-        loop = asyncio.get_running_loop()
-        locks = _WRITE_LOCKS.get(loop)
-        if locks is None:
-            locks = _WRITE_LOCKS[loop] = {}
-        lock = locks.get(self._base)
-        if lock is None:
-            lock = locks[self._base] = asyncio.Lock()
-        return lock
+        return _server_lock(self._base)
 
     async def available(self) -> bool:
         """True if the go2rtc API answers ``GET /api`` with 200."""
@@ -83,8 +102,8 @@ class Go2rtcClient:
             _LOGGER.debug("go2rtc: not available at %s (%s)", self._base, exc)
             return False
 
-    async def list_streams(self) -> dict:
-        """Return the current streams dict (empty on error)."""
+    async def _get(self) -> dict:
+        """``GET /api/streams``: the current streams dict (empty on error)."""
         try:
             async with self._session.get(
                 f"{self._base}/api/streams", timeout=self._timeout
@@ -95,6 +114,10 @@ class Go2rtcClient:
         except Exception as exc:
             _LOGGER.debug("go2rtc: list_streams error: %s", exc)
         return {}
+
+    async def list_streams(self) -> dict:
+        """Return the current streams dict (empty on error)."""
+        return await self._get()
 
     async def has_stream(self, name: str) -> bool:
         return name in (await self.list_streams())
@@ -147,16 +170,22 @@ class Go2rtcClient:
         somewhere you control the timestamps, or confirm on your own build that
         the RTP timestamps advance by the frame's sample count.
         """
-        sources = [source, *extra_sources]
+        async with self._write_lock():
+            return await self._put(name, [source, *extra_sources])
+
+    async def remove_stream(self, name: str) -> bool:
+        """Remove ``name`` from go2rtc. Returns True on 200."""
+        async with self._write_lock():
+            return await self._delete(name)
+
+    async def _put(self, name: str, sources: "list[str]") -> bool:
+        """``PUT /api/streams``, unlocked: the caller holds ``_write_lock``."""
         try:
-            async with (
-                self._write_lock(),
-                self._session.put(
-                    f"{self._base}/api/streams",
-                    params=[("name", name), *(("src", s) for s in sources)],
-                    timeout=self._timeout,
-                ) as resp,
-            ):
+            async with self._session.put(
+                f"{self._base}/api/streams",
+                params=[("name", name), *(("src", s) for s in sources)],
+                timeout=self._timeout,
+            ) as resp:
                 if resp.status == 200:
                     _LOGGER.info("go2rtc: registered stream %r -> %s", name, sources)
                     return True
@@ -172,17 +201,14 @@ class Go2rtcClient:
             _LOGGER.warning("go2rtc: add stream %r error: %s", name, exc)
         return False
 
-    async def remove_stream(self, name: str) -> bool:
-        """Remove ``name`` from go2rtc. Returns True on 200."""
+    async def _delete(self, name: str) -> bool:
+        """``DELETE /api/streams``, unlocked: the caller holds ``_write_lock``."""
         try:
-            async with (
-                self._write_lock(),
-                self._session.delete(
-                    f"{self._base}/api/streams",
-                    params={"src": name},
-                    timeout=self._timeout,
-                ) as resp,
-            ):
+            async with self._session.delete(
+                f"{self._base}/api/streams",
+                params={"src": name},
+                timeout=self._timeout,
+            ) as resp:
                 return resp.status == 200
         except Exception as exc:
             _LOGGER.debug("go2rtc: remove stream %r error: %s", name, exc)
@@ -203,6 +229,75 @@ async def _said(resp) -> str:
     return ": " + text[:160] if text else ""
 
 
+class EnsureOutcome(enum.StrEnum):
+    """What :func:`async_ensure_stream` did."""
+
+    #: go2rtc accepted the PUT: the stream is defined with the given source.
+    REGISTERED = "registered"
+    #: go2rtc rejected the PUT but already holds the stream, which it keeps
+    #: serving from its existing definition. A duplicate key in go2rtc's own
+    #: config file makes it answer every PUT this way until fixed by hand.
+    UNCHANGED = "unchanged"
+    #: Rejected or unreachable, and the stream is not there.
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class EnsureResult:
+    """The answer of :func:`async_ensure_stream`."""
+
+    outcome: EnsureOutcome
+
+    @property
+    def ok(self) -> bool:
+        """True when go2rtc holds the stream (registered or unchanged)."""
+        return self.outcome is not EnsureOutcome.FAILED
+
+
+async def async_ensure_stream(
+    client: Go2rtcClient,
+    name: str,
+    source: Optional[str] = None,
+    *,
+    recreate: bool = False,
+) -> EnsureResult:
+    """Define ``name`` on the go2rtc ``client`` talks to, as one locked call.
+
+    ``source`` is what go2rtc pulls; ``None`` defines the stream with
+    :data:`PLACEHOLDER_SOURCE`, for a stream whose media is published into it.
+
+    ``recreate`` removes the definition first. A PUT alone does not rebuild
+    the track, so a camera whose H.264 parameter sets change between sessions
+    (``protocol.sprop_is_unstable``) needs this, or go2rtc keeps handing
+    players the decoder configuration from the first session and they decode
+    only keyframes. Do it before the publisher attaches: removing a definition
+    a publisher is attached to leaves it nowhere to publish.
+
+    The writes, under the server's write lock (see
+    ``Go2rtcClient._write_lock``) so no other write lands between them:
+    ``DELETE`` (only with ``recreate``), then ``PUT``. Only if the PUT was
+    rejected, ``GET /api/streams``, after the lock is released, to see whether
+    go2rtc holds the stream anyway. Never raises.
+    """
+    src = PLACEHOLDER_SOURCE if source is None else source
+    async with client._write_lock():
+        if recreate:
+            await client._delete(name)
+        if await client._put(name, [src]):
+            return EnsureResult(EnsureOutcome.REGISTERED)
+    # A rejected register call does not mean go2rtc cannot serve the stream: a
+    # duplicate key in its own config makes it answer every PUT with 400 while
+    # the streams stay registered. Ask.
+    if await client.has_stream(name):
+        return EnsureResult(EnsureOutcome.UNCHANGED)
+    return EnsureResult(EnsureOutcome.FAILED)
+
+
+async def async_remove_stream(client: Go2rtcClient, name: str) -> bool:
+    """Remove ``name`` under the server's write lock. True on 200; never raises."""
+    return await client.remove_stream(name)
+
+
 async def prefer_go2rtc(
     session: aiohttp.ClientSession,
     name: str,
@@ -213,22 +308,19 @@ async def prefer_go2rtc(
     """Prefer-go2rtc-with-ffmpeg-fallback decision.
 
     If go2rtc is reachable at ``base_url``, register ``source`` under ``name``
-    and return the go2rtc RTSP pull URL (low-latency / native codec path).
-    If go2rtc is unavailable, or the stream is neither registered nor already
-    present, return ``None`` so the caller falls back to serving ``source``
-    directly (e.g. HA HLS).
+    (through :func:`async_ensure_stream`) and return the go2rtc RTSP pull URL
+    (low-latency / native codec path). If go2rtc is unavailable, or the stream
+    is neither registered nor already present, return ``None`` so the caller
+    falls back to serving ``source`` directly (e.g. HA HLS).
     """
     client = Go2rtcClient(session, base_url)
     if not await client.available():
         _LOGGER.debug("go2rtc unavailable - falling back to direct serve for %r", name)
         return None
-    if not await client.ensure_stream(name, source):
-        # A rejected register call does not mean go2rtc cannot serve the stream:
-        # a duplicate key in its own config makes it answer every PUT with 400
-        # while the stream stays registered. Falling back on that alone would
-        # drop a camera go2rtc can serve onto the slower HLS path, so ask.
-        if not await client.has_stream(name):
-            return None
+    result = await async_ensure_stream(client, name, source)
+    if not result.ok:
+        return None
+    if result.outcome is EnsureOutcome.UNCHANGED:
         _LOGGER.info(
             "go2rtc: register call for %r failed but the stream is present - "
             "using go2rtc rather than falling back",

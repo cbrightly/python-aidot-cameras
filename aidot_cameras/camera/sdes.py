@@ -9,7 +9,11 @@ import asyncio
 import logging
 from typing import Callable, Optional
 
-from .constants import SDES_SPEAKERSTART_DELAY, SDES_TALK_PUMP_IDLE_TICK
+from .constants import (
+    IOTYPE_USER_IPCAM_SPEAKERSTART_WEB_RTC_RESP,
+    SDES_SPEAKERSTART_DELAY,
+    SDES_TALK_PUMP_IDLE_TICK,
+)
 from .protocol import (
     SPEAKER_ACK_TIMEOUT_S,
     AvioRequestMixin,
@@ -206,7 +210,9 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
         # while nothing is listening.  Note this does NOT send 848 - the bridge
         # thread does, once want_speaker is set.  Moving the send here would put
         # SCTP DATA on a second thread, racing the heartbeat's TSN.
-        waiter = self._avio_responses.expect(851)
+        waiter = self._avio_responses.expect(
+            IOTYPE_USER_IPCAM_SPEAKERSTART_WEB_RTC_RESP
+        )
         if self._talk_thread is None or not self._talk_thread.is_alive():
             import threading
 
