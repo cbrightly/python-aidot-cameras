@@ -17,7 +17,7 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 - **`docs/RELEASING.md`** is the release routine from here, with a docs and
   wiki review before every release; **`docs/PROTOCOL-INVENTORY.md`** lists
   every message between the app and the cameras against what is implemented.
-- **`_upstream.DEVICE_STATE_IS_UPSTREAMS` is back**, as `True`: the public
+- **`_upstream.DEVICE_STATE_IS_UPSTREAMS` is back**, as `False`: the public
   integration's tests (2.37.x, 2.38.x) read it to shape their stub, and the
   library's own CI runs that suite. The downstream job now runs the 2.38.0
   suite rather than 2.37.15's.

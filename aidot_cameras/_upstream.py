@@ -126,9 +126,13 @@ class _DeviceState(IntEnum):
 
 DeviceState = _DeviceState
 # The integration's tests (2.37.x and 2.38.x) read this to choose the shape of
-# the device-client stub they build, so it stays after the shape it chose
-# between was dropped: there is one shape now, upstream's enum, so it is True.
-DEVICE_STATE_IS_UPSTREAMS = True
+# the device-client stub they build: True meant "upstream keeps a DeviceState
+# enum on the client", False "upstream keeps connect_and_login booleans". It
+# stays after the choice was dropped from the code, and it is False: every
+# upstream the library supports reports the session through
+# ``connect_and_login`` (device_session_authenticated below), and the enum
+# above is this module's own re-export, never produced by upstream.
+DEVICE_STATE_IS_UPSTREAMS = False
 
 
 def device_session_authenticated(device_client: Any) -> bool:
