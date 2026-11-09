@@ -1,8 +1,9 @@
-# What 1.0.0 is waiting on
+# 1.0.0, and how releases work after it
 
-The point of this file is to make the 1.0.0 bar checkable, so that "are we
-ready" is a matter of record rather than opinion. It states the bar and where
-each item stands. The dated working record behind it (per-release tables,
+This file set the 1.0.0 bar and recorded where each item stood, so that "are
+we ready" was a matter of record rather than opinion. 1.0.0 is cut (2026-11-09,
+from the code released as `1.0.0rc72`); the first section below is now the
+release rules that replace the bar, and the rest is the record. The dated working record behind it (per-release tables,
 measurements, and every re-dating of the soak clock) is in this file's git
 history (`git log -p -- docs/ROAD-TO-1.0.md`) and in
 [CHANGELOG.md](../CHANGELOG.md).
@@ -16,10 +17,53 @@ understood and its shape has settled:
   it ([API-STABILITY.md](API-STABILITY.md));
 - every release passes a gate that streams real cameras before it reaches PyPI
   ([TESTING.md](TESTING.md), [CI-RUNNER.md](CI-RUNNER.md));
-- the release that becomes 1.0.0 has run in ordinary use for two weeks without
-  a streaming-breaking release replacing it.
+- the release that becomes 1.0.0 has run in ordinary use on the reference
+  installation, with the scheduled views below getting video.
 
-Where things stand: the library is at `1.0.0rc72` on PyPI. `1.0.0rc58` is
+## Release rules from 1.0.0
+
+Decided 2026-11-09, replacing the two-week bar below. The reasons: the bar was
+reset five times in three weeks (every real fix restarts it, so it measured
+how long fixes could be put off); the project has a handful of users, for whom
+a fix held back costs more than a fix that needs a follow-up; and pre-release
+numbering had stopped carrying information (72 release candidates, and the
+integration's stable channel sat on 2.37.18 while its users' fresh installs
+pulled whichever library pre-release was newest, see below).
+
+- **Plain semantic versions, no pre-release suffixes.** A fix is a patch
+  (1.0.1); a feature or a refactor is a minor (1.1.0); only a change that
+  breaks a caller of the public surface ([API-STABILITY.md](API-STABILITY.md))
+  is a major. The integration numbers itself the same way.
+- **The gate stays.** Every library release passes the live gate
+  ([CI-RUNNER.md](CI-RUNNER.md)) before PyPI, and each camera's report is
+  diffed against the previous run's; the published wheel is checked against
+  its tag file for file.
+- **The integration is proved on the reference installation before it is
+  published**, not after: the library release goes to PyPI first (few install
+  it directly), the integration is deployed to the box from its development
+  main with a backup taken, Home Assistant is restarted, the log is read and
+  the installed files are checked by hash, and only then is the public release
+  cut. A change to a stream path (an open, a serve loop, the publish or the
+  mux) stays on the box through two of the scheduled view rounds before the
+  cut; anything else needs one.
+- **The integration pins the library to a minor range**, `>=X.Y.Z,<X.(Y+1)`.
+  Until 2.38.0 its requirement was a pre-release floor alone (`>=1.0.0rc62`),
+  which under PEP 440 lets pip install any newer pre-release, so a fresh
+  install of a year-old stable release would have been given whichever library
+  beta was newest. A library minor release therefore always arrives with an
+  integration release that moves the range.
+- **Fewer releases.** Work is iterated on branches against the gate and
+  released when there is something users should have, not per commit.
+- **Stability is measured, not counted.** The soak watcher's share of
+  scheduled views that got video, per day and since each release, is the
+  number to read ([TESTING.md](TESTING.md)); a release does not reset anything
+  but its own column. What is kept from the bar: a backup before every deploy,
+  review before every commit, and a live check of smooth video and sound on the
+  affected models before anything is published.
+
+## The record to 1.0.0
+
+Where things stood at the cut: the library was at `1.0.0rc72` on PyPI. `1.0.0rc58` is
 yanked: in it a successful DTLS open returned `None` instead of its session;
 `rc59` fixed that and `rc60` adds a test that holds every phase of both opens
 to exporting what later phases read. `rc62` fixes what the first day of
@@ -46,13 +90,21 @@ began with 2.38.0b1 (`>=1.0.0rc66`), and 2.38.0b4 requires `>=1.0.0rc70`.
 
 ## Open
 
-### 1. Two weeks with no streaming-breaking release
+Nothing. Item 1 below was the last open item; it closed by decision rather than
+by the count reaching two weeks (see the release rules above).
 
-This is the only open item. The cadence of finds is the evidence: 1.0.0 is
-cut once a release has run for two weeks of ordinary use on the reference
-installation and nothing streaming-breaking has had to ship in that time.
+### 1. Two weeks with no streaming-breaking release (closed 2026-11-09)
 
-Two weeks is the bar as originally set. Some later entries in this file said
+The bar as set: 1.0.0 is cut once a release has run for two weeks of ordinary
+use on the reference installation and nothing streaming-breaking has had to
+ship in that time. The count was reset by `rc62`, `rc63`, `rc70`, `rc71` and
+`rc72` and never reached two weeks; the longest run was eleven days (`rc62`,
+2026-10-26 to 2026-11-06, ended by the `rc63` live test and the box going off
+the network). 1.0.0 is the `rc72` code, which had passed the gate and run on
+the box for a day; what two more weeks would have added is the number the
+soak watcher reports anyway, so the two weeks moved from a bar to a reading.
+
+Two weeks was the bar as originally set. Some later entries in this file said
 ten days; that was an inconsistency, not a change of bar.
 
 **Day zero.** The original reference installation was off the network from
@@ -83,8 +135,9 @@ shut itself down and was off the network for some days. Day zero is re-dated
 once the box is back and runs released `rc63` (or later) with a released
 integration, checked by hash as above.
 
-**Day zero is 2026-11-10; the target is 2026-11-24.** The count that began
-on 2026-11-07 under `1.0.0rc71` was reset by `rc72`, which changes how the
+**Day zero is 2026-11-10; there is no target.** The soak watcher keeps
+counting from this day for its reading, and the count no longer gates a
+release (see the rules above). The count that began on 2026-11-07 under `1.0.0rc71` was reset by `rc72`, which changes how the
 DTLS serve loop paces a session the camera closes itself on every A000088.
 On 2026-11-09 the box was given `1.0.0rc72` and integration 2.38.0b6: the
 integration's 35 installed files match the public `v2.38.0b6` release by
@@ -169,10 +222,9 @@ Each release's CHANGELOG entry is where its classification goes, with the
 reason. When a release resets the clock, the new day zero is the first
 ordinary day the reference installation runs it.
 
-**The cut.** 1.0.0 is cut from the release the soak ran on. Any further rc
-before then should be a fix the soak found, not planned work. At the cut the
-README's `--pre` install instructions change, because a bare `pip install`
-will then resolve the camera line.
+**The cut.** 1.0.0 was cut on 2026-11-09 from the `rc72` code, unchanged
+but for the version. With it the README's `--pre` install instructions went,
+because a bare `pip install` now resolves the camera line.
 
 ## Closed
 

@@ -6,6 +6,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0]
+
+The code released as `1.0.0rc72`, unchanged but for the version: it passed
+the live gate on 2026-11-08 and has run on the reference installation since
+2026-11-09. From here releases carry plain versions and no pre-release
+suffix: a fix is a patch, a feature or refactor a minor, and only a break of
+the public surface a major. The reasoning, and what replaces the two-week
+soak bar, is in [docs/ROAD-TO-1.0.md](docs/ROAD-TO-1.0.md).
+
+### Changed
+- **Installing no longer needs `--pre`.** A bare `pip install
+  python-aidot-cameras` now resolves this release rather than `0.17.2`.
+
 ## [1.0.0rc72]
 
 Soak: resets the clock. One change, to the DTLS serve loop's pacing after a

@@ -30,21 +30,19 @@ generic SDES path.
 
 ## Install
 
-**Pass `--pre`.** The camera line is published as 1.0.0 release candidates;
-without `--pre`, pip resolves `0.17.2` (2026-08-08), which predates them and
-has known faults fixed since (SDES sessions that stop after about eighty
-seconds, and a Home Assistant stream restart about once a minute). That stays
-true until 1.0.0 is final.
-
 ```bash
 # lights + camera cloud/control only:
-pip install --pre python-aidot-cameras
+pip install python-aidot-cameras
 # add live streaming, snapshots and two-way audio (aiortc, av, ...):
-pip install --pre "python-aidot-cameras[webrtc]"
+pip install "python-aidot-cameras[webrtc]"
 # the CLI as an isolated tool:
-pipx install --pip-args=--pre "python-aidot-cameras[webrtc]"
-uv tool install --prerelease=allow "python-aidot-cameras[webrtc]"
+pipx install "python-aidot-cameras[webrtc]"
+uv tool install "python-aidot-cameras[webrtc]"
 ```
+
+Releases carry plain versions (1.0.0 and up); a release before 1.0.0 was a
+release candidate and needed `--pre`. Versions 0.x predate the camera line's
+current form and have known faults fixed since.
 
 The latest unreleased code:
 `pip install "python-aidot-cameras[webrtc] @ git+https://github.com/cbrightly/python-aidot-cameras"`.
