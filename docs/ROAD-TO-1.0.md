@@ -19,7 +19,7 @@ understood and its shape has settled:
 - the release that becomes 1.0.0 has run in ordinary use for two weeks without
   a streaming-breaking release replacing it.
 
-Where things stand: the library is at `1.0.0rc71` on PyPI. `1.0.0rc58` is
+Where things stand: the library is at `1.0.0rc72` on PyPI. `1.0.0rc58` is
 yanked: in it a successful DTLS open returned `None` instead of its session;
 `rc59` fixed that and `rc60` adds a test that holds every phase of both opens
 to exporting what later phases read. `rc62` fixes what the first day of
@@ -83,7 +83,17 @@ shut itself down and was off the network for some days. Day zero is re-dated
 once the box is back and runs released `rc63` (or later) with a released
 integration, checked by hash as above.
 
-**Day zero is 2026-11-07; the target is 2026-11-21.** The count that began on
+**Day zero is 2026-11-10; the target is 2026-11-24.** The count that began
+on 2026-11-07 under `1.0.0rc71` was reset by `rc72`, which changes how the
+DTLS serve loop paces a session the camera closes itself on every A000088.
+On 2026-11-09 the box was given `1.0.0rc72` and integration 2.38.0b6: the
+integration's 35 installed files match the public `v2.38.0b6` release by
+hash, and the library installed is `1.0.0rc72`, whose wheel on PyPI matches
+its tag file for file. 2026-11-09 had that install and a restart, so it is
+provocation; 2026-11-10 is the first ordinary day.
+
+The count before that, kept for the record: day zero 2026-11-07 under `rc71`
+(target 2026-11-21). The count that began on
 2026-11-03 under `1.0.0rc70` and integration 2.38.0b4 was reset by `rc71`,
 which changes the DTLS serve loop on every A000088. On 2026-11-06 the box
 was given `1.0.0rc71` and integration 2.38.0b5 (Home Assistant 2026.10.4 on
