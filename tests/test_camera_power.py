@@ -126,3 +126,26 @@ def test_the_keepalive_pause_is_plain_when_on(monkeypatch):
     monkeypatch.setattr(camera_client.asyncio, "sleep", _sleep)
     asyncio.run(CameraMixin._backoff_or_offline_pause(stub, 30.0))
     assert slept == [30.0]
+
+
+def test_a_fresh_power_write_outranks_a_stale_report(monkeypatch):
+    """The owner switched the camera on; a poll in flight still says off."""
+    import time as _time
+
+    dev = SimpleNamespace(status=CameraStatusData())
+    dev.status.powered = False  # the stale report
+    dev._power_write = (_time.monotonic(), True)
+    assert not _camera_powered_off(dev)
+    dev._power_write = (_time.monotonic() - 120.0, True)  # grace over
+    assert _camera_powered_off(dev)
+
+
+def test_set_power_stamps_the_write(make_camera_device_client):
+    cam = make_camera_device_client("A000088")
+
+    async def _set(name, value, **kw):
+        return True
+
+    cam.async_set_device_attribute = _set
+    asyncio.run(cam.async_set_power(True))
+    assert cam._power_write[1] is True

@@ -6,6 +6,14 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.1.1]
+
+Two things the official app does that the library did not (the camera's own
+power switch, and acting on the cloud's device-removed notice), a fix to the
+controls for callers of the public open, and the app's third quality value.
+The stream paths are unchanged apart from the serve loops pausing while a
+camera is switched off.
+
 ### Added
 - **The camera's power switch: `status.powered` and `async_set_power(on)`.**
   The `TurnOnOff` property, the one the official app writes most (its live

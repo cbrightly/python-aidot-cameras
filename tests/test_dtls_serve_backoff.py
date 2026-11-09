@@ -1006,7 +1006,7 @@ def test_the_busy_floor_stops_when_streaming_does(monkeypatch, cam):
 
 @pytest.mark.parametrize(
     "offline, says",
-    [(False, "(retry 45s;"), (True, "(retry in up to 600s, sooner once back online;")],
+    [(False, "(retry 45s;"), (True, "(retry in up to 600s, sooner once back;")],
 )
 def test_the_failed_open_line_names_the_wait_that_runs(
     monkeypatch, cam, caplog, offline, says

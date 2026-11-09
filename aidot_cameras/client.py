@@ -332,7 +332,10 @@ class CameraClient(_UpstreamAidotClient):
         )
 
         if token is not None and not isinstance(token, dict):
-            _LOGGER.warning("ignoring a stored token that is not an object (%s)", type(token).__name__)
+            _LOGGER.warning(
+                "ignoring a stored token that is not an object (%s)",
+                type(token).__name__,
+            )
             token = None
         if token is not None:
             stored = token

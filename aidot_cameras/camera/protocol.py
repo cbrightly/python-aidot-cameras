@@ -590,7 +590,9 @@ def _compress_sdp_for_camera(sdp: str) -> str:
                             _kept_pts.add(ln.split(":")[1].split(" ")[0])
                         except Exception:
                             _LOGGER.debug(
-                                "swallowed exception in %s", "_compress_sdp_for_camera", exc_info=True
+                                "swallowed exception in %s",
+                                "_compress_sdp_for_camera",
+                                exc_info=True,
                             )
             elif media_type == "m=video":
                 if "H264/90000" in ln and seen.get("H264/90000") is None:
@@ -600,7 +602,9 @@ def _compress_sdp_for_camera(sdp: str) -> str:
                         _kept_pts.add(seen["H264/90000_pt"])
                     except Exception:
                         _LOGGER.debug(
-                            "swallowed exception in %s", "_compress_sdp_for_camera", exc_info=True
+                            "swallowed exception in %s",
+                            "_compress_sdp_for_camera",
+                            exc_info=True,
                         )
                 elif "H265/90000" in ln and seen.get("H265/90000") is None:
                     keep(ln, "H265/90000")
@@ -609,7 +613,9 @@ def _compress_sdp_for_camera(sdp: str) -> str:
                         _kept_pts.add(seen["H265/90000_pt"])
                     except Exception:
                         _LOGGER.debug(
-                            "swallowed exception in %s", "_compress_sdp_for_camera", exc_info=True
+                            "swallowed exception in %s",
+                            "_compress_sdp_for_camera",
+                            exc_info=True,
                         )
                 elif "apt=" in ln:
                     try:
@@ -3313,7 +3319,11 @@ def mask_sdp_secrets(sdp: str) -> str:
             for attr in _SDP_SECRET_ATTRS:
                 if stripped.startswith(attr):
                     head, _, _rest = ln.partition(attr)
-                    tail = "\r\n" if ln.endswith("\r\n") else ("\n" if ln.endswith("\n") else "")
+                    tail = (
+                        "\r\n"
+                        if ln.endswith("\r\n")
+                        else ("\n" if ln.endswith("\n") else "")
+                    )
                     ln = f"{head}{attr}<masked>{tail}"
                     break
         out.append(ln)

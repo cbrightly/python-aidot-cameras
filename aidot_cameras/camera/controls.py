@@ -8,6 +8,7 @@ mixin must be combined into CameraMixin (it is not usable standalone).
 
 import logging
 import struct
+import time
 
 from typing import Optional
 
@@ -61,9 +62,25 @@ def control_session(dev):
     if session is not None:
         return session
     session = getattr(dev, "_direct_session", None)
-    if session is None or getattr(session, "_stop_task", None) is not None:
+    if session is None:
+        return None
+    if not _session_is_live(session):
+        # Stopped, or died on its own (the camera closed, ICE failed): not a
+        # session to ride, and not worth keeping alive either.
+        dev._direct_session = None
         return None
     return session
+
+
+def _session_is_live(session) -> bool:
+    """A session whose teardown has not begun and whose peer connection, if it
+    has one, is not closed or failed. An SDES session has no peer connection
+    to read; its stop is the only signal."""
+    if getattr(session, "_stop_task", None) is not None:
+        return False
+    pc = getattr(session, "_pc", None)
+    state = getattr(pc, "connectionState", None) if pc is not None else None
+    return state not in ("closed", "failed")
 
 
 class _CameraControlsMixin:
@@ -185,6 +202,9 @@ class _CameraControlsMixin:
         ok = await self.async_set_device_attribute("TurnOnOff", 1 if on else 0)
         if ok:
             self.status.powered = on
+            # A device-list poll that was in flight can still carry the old
+            # value; _camera_powered_off prefers this write for a while.
+            self._power_write = (time.monotonic(), on)
         return ok
 
     async def async_set_microphone(self, enabled: bool) -> bool:
@@ -671,6 +691,12 @@ class _CameraControlsMixin:
         session = self._control_session()
         if q is None or session is None:
             return
+        # Once per session: the public open applies it as it records the
+        # session, and the serve loops apply it again when they prepare the
+        # same session; the second must not send the command twice.
+        if getattr(self, "_resolution_applied_to", None) is session:
+            return
+        self._resolution_applied_to = session
         try:
             if session._avio_cmd(
                 IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ, struct.pack("<IB3x", 0, q)

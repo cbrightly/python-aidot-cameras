@@ -7,6 +7,7 @@ client.py so existing imports keep working.
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -376,6 +377,10 @@ class VideoFrame:
         return self.frame_type == _FRAME_TYPE_AUDIO
 
 
+#: How long a local TurnOnOff write outranks the cloud's report of it.
+_POWER_WRITE_GRACE_S = 60.0
+
+
 def _camera_powered_off(dev: Any) -> bool:
     """True when the camera's own power switch (``TurnOnOff``) is off.
 
@@ -383,6 +388,11 @@ def _camera_powered_off(dev: Any) -> bool:
     request, so the serve loops treat it as they treat a cloud-offline camera:
     expected open failures at DEBUG, and a pause instead of retries until it
     is switched back on. None (not yet reported) is not off."""
+    write = getattr(dev, "_power_write", None)
+    if write is not None and time.monotonic() - write[0] < _POWER_WRITE_GRACE_S:
+        # The owner just switched it; a poll in flight may still carry the
+        # old value. The write wins for a while.
+        return write[1] is False
     return getattr(getattr(dev, "status", None), "powered", None) is False
 
 

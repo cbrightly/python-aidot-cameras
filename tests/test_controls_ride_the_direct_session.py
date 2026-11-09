@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import struct
+import types
 
 import pytest
 
@@ -92,3 +93,24 @@ def test_the_serve_loops_session_wins(cam):
     cam._stream_session = serve
     asyncio.run(cam.async_set_resolution("hd"))
     assert serve.requests and direct.requests == []
+
+
+def test_a_session_whose_connection_died_is_not_ridden_and_is_let_go(cam):
+    s = _Session()
+    s._pc = types.SimpleNamespace(connectionState="failed")
+    cam._note_direct_session(s)
+    assert cam._control_session() is None
+    assert cam._direct_session is None
+
+
+def test_the_remembered_resolution_is_applied_once_per_session(cam):
+    asyncio.run(cam.async_set_resolution("sd"))
+    s = _Session()
+    cam._note_direct_session(s)  # applies
+    cam._stream_session = s  # the serve loop then prepares the same session
+    cam._apply_pending_resolution()
+    assert len(s.cmds) == 1
+    s2 = _Session()
+    cam._stream_session = s2
+    cam._apply_pending_resolution()
+    assert len(s2.cmds) == 1

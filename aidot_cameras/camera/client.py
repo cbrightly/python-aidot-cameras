@@ -1597,7 +1597,7 @@ async def _dtls_serve_loop_open_attempt(
             _level,
             "DTLS serve: open failed for %s (retry %s; %d in a row): %s",
             self.device_id,
-            f"in up to {_delay:.0f}s, sooner once back online"
+            f"in up to {_delay:.0f}s, sooner once back"
             if _offline
             else f"{_delay:.0f}s",
             _n,
@@ -1606,7 +1606,7 @@ async def _dtls_serve_loop_open_attempt(
         try:
             await self._chunked_wait(
                 _delay,
-                until=(lambda: bool(self.status.online)) if _offline else None,
+                until=(lambda: not _cloud_says_unavailable(self)) if _offline else None,
                 min_s=_floor,
             )
         except asyncio.CancelledError:
@@ -2679,6 +2679,15 @@ async def _sdes_keepalive_after_session(
         except asyncio.CancelledError:
             return _PhaseReturn(None)
     return None
+
+
+def _call_guarded(callback) -> None:
+    """Run a consumer's callback on the loop, keeping its failure out of the
+    transport that scheduled it."""
+    try:
+        callback()
+    except Exception:
+        _LOGGER.debug("callback failed", exc_info=True)
 
 
 class CameraMixin(
@@ -5524,8 +5533,11 @@ class CameraMixin(
         if pm is None:
             return False
         device_id = self.device_id
+        loop = asyncio.get_running_loop()
 
         def _handler(topic, payload) -> None:
+            # Runs on the MQTT thread; the callback is handed to the loop the
+            # watch was started on, so a consumer may touch loop state in it.
             if "devUnbindNotif" not in str(payload)[:400]:
                 return
             try:
@@ -5535,31 +5547,45 @@ class CameraMixin(
             if (msg.get("method") or "") != "devUnbindNotif":
                 return
             inner = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
-            dev = inner.get("devId") or inner.get("deviceId") or msg.get("devId")
+            src = str(msg.get("srcAddr") or "")
+            dev = (
+                inner.get("devId")
+                or inner.get("deviceId")
+                or msg.get("devId")
+                or (src.rsplit(".", 1)[-1] if src else None)
+            )
             if dev and dev != device_id:
                 return
+            if not dev:
+                # The notice's shape is not pinned down; say what came so it
+                # can be. Every watcher on the account acts on such a notice.
+                _LOGGER.info(
+                    "devUnbindNotif without a device id (keys %s); refreshing",
+                    sorted(inner.keys()),
+                )
             _LOGGER.info(
                 "camera %s: the cloud reports it removed from the account", device_id
             )
-            try:
-                callback()
-            except Exception:
-                _LOGGER.debug("unbind callback failed", exc_info=True)
+            loop.call_soon_threadsafe(_call_guarded, callback)
 
         await self.async_stop_watching_unbind()
         await pm.subscribe([f"iot/v1/c/{self.user_id}/#"])
-        self._unbind_handler = pm.add_handler(_handler)
+        # Kept with the connection it was added to: that connection can be
+        # retired and rebuilt (a credential refusal), and the handler must
+        # come off the one it is on, not whichever is current then. A rebuilt
+        # connection does not carry the watch; the consumer keeps polling.
+        self._unbind_watch = (pm, pm.add_handler(_handler))
         return True
 
     async def async_stop_watching_unbind(self) -> None:
-        """Stop the ``async_watch_unbind`` listener, if any."""
-        handler = getattr(self, "_unbind_handler", None)
-        if handler is None:
+        """Stop the ``async_watch_unbind`` listener, if any. Touches only the
+        connection the handler was added to; never builds one."""
+        watch = getattr(self, "_unbind_watch", None)
+        if watch is None:
             return
-        self._unbind_handler = None
-        pm = await self._get_persistent_mqtt()
-        if pm is not None:
-            pm.remove_handler(handler)
+        self._unbind_watch = None
+        pm, handler = watch
+        pm.remove_handler(handler)
 
     async def async_stop_motion_polling(self) -> None:
         """Stop the motion-event polling started by ``async_start_motion_polling``."""
