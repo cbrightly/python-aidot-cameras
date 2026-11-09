@@ -204,6 +204,23 @@ their first 12 s, from outside the camera's network. The encode is unchanged;
 the setting is real and shared with the app, so the library offers all three
 values and the integration can show the one the camera reports.
 
+Whether a reconnect under the stored setting changes the encode was then
+measured, since the app's visible effect might have come from a session that
+starts under the new value rather than from the command itself. It does not.
+On the A000088, 15 s windows inside one LAN session gave 310, 313, 309, 324 and
+307 kbps at 15 fps across auto, hd, sd, hd, sd, and three fresh sessions from
+outside the network under stored sd, hd and auto gave 335, 335 and 333 kbps.
+On the A001064, twelve fresh sessions alternating stored hd and sd, each
+measured over 15 s after its first media, gave hd 3686, 3277, 1775, 1911,
+2048, 1638 and sd 2458, 2594, 1775, 1911, 1911, 1775 kbps, all h264 1280x720:
+the first round's hd lead was the camera's own session-to-session drift (it
+reversed in the second round) and three pairs were identical. Our receiver's
+REMB was ruled out as a cap: aiortc never sent one (the camera's RTP carries
+no abs-send-time), and disabling it or forcing 4 Mbps changed nothing on the
+A000088. The app's code has no reconnect, re-offer or renegotiation on its
+quality path either; the only reaction to the camera's StreamType report is
+the label.
+
 ### Why the app's switch still works
 
 The owner reports the app's Auto/HD/SD switch has a visible effect. It sends the
