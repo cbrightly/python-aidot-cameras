@@ -59,7 +59,7 @@ Hex is the TUTK IOTYPE; the struct is TUTK's unless noted.
 | `LISTEVENT` / `HASLISTEVENT` | `0x318`, `0x4b5` | SD card recording list and day map | yes |
 | `RECORD_PLAYCONTROL` | `0x31a` | play / pause / seek a card recording | yes |
 | `DELLISTEVENT` | `0x4b7` | delete card recordings | no: the integration does not offer deletion. Could be a service; low demand |
-| `CUSTOM_COMMAND` (thumbnails) | `0x4b9` | fetch thumbnails for a list of card recordings | no: the media browser shows recordings without thumbnails. Worth considering for the card browser |
+| `CUSTOM_COMMAND` (thumbnails) | `0x4b9` | ask for thumbnails of card recordings: a request channel id (int32 LE) followed by the recordings' start times (int64 LE each); `0x4ba` acknowledges, and each picture then arrives out of band as a `thumbnailPhotoNotify` over MQTT (`deviceId`, `time`, `path`, `type`, `command`), the camera having uploaded it | skip for now: it needs a live session to the camera at browse time (the app asks from its live screen), so a media-browser visit would cost a cold open and the camera's one media slot. Documented so it can be picked up if wanted |
 | `RT_RADAR_START` / `STOP` / `SDCARD_START` / `REPORT` | `0x528`-`0x52f` | the radar / tracking overlay the app draws for models with a radar | skip: no supported model reports one |
 
 Commands the library sends that the app does not: none on the live path. The
@@ -116,9 +116,14 @@ stream.
   camera the user cannot reach; left to the app on purpose. The firmware
   version is shown.
 - **Event push (`devEventNotif` / `eventNotify`):** the integration polls the
-  cloud event list; the app gets a push. Faster motion events if implemented.
-- **Card recording thumbnails and deletion** (`0x4b9`, `0x4b7`): browser
-  polish; not required for playback.
+  cloud event list; the app gets a push over its own socket service. Whether
+  the cameras also announce events on the MQTT topics is unmeasured: a
+  12-minute idle capture and a provoked PTZ pan showed none, and a real
+  motion event has not yet been captured. Open.
+- **Card recording thumbnails** (`0x4b9` + `thumbnailPhotoNotify`): protocol
+  understood (section 2), not implemented: a thumbnail request needs a live
+  session, which a media-browser visit does not have.
+- **Card recording deletion** (`0x4b7`): browser polish, low demand.
 - **Cloud recordings via the app's streaming server**: the HTTP path works;
   no reason to change.
 - **Radar overlay, BLE, panorama stitching, IPv6:** out of scope for the
