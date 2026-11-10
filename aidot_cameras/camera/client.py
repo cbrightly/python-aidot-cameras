@@ -1313,10 +1313,14 @@ def _get_stream_slots() -> "asyncio.Semaphore":
 
 # Battery cameras re-sleep on their own low-power timer ~25 s after the last
 # keep-alive, even mid-view. Renew setKeepAliveTime INSIDE that window so there
-# is no sleep gap (the official app renews every 30 s, which leaves a ~5 s gap
-# against the 25 s window). See CameraMixin._keepalive_renew_loop.
+# is no sleep gap. The official app renews every 10 s while its live view is
+# open (DeviceWakeUpRepos.keepToAlive: Flowable.interval(10, SECONDS); an
+# earlier reading here said 30 s, which was wrong), for every model; a mains
+# camera never sleeps, so this library renews for battery cameras only, at the
+# app's cadence since 1.2.0 (20 s before, which left 5 s of slack against the
+# window). See CameraMixin._keepalive_renew_loop.
 _KEEPALIVE_WINDOW_S = 25
-_KEEPALIVE_RENEW_S = 20
+_KEEPALIVE_RENEW_S = 10
 
 
 def _ack_matches_seq(msg, seq):

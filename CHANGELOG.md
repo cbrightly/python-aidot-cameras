@@ -24,6 +24,10 @@ One addition to the public surface, for scheduled views of battery cameras.
   the camera sleep again about 25 s later.
 
 ### Changed
+- **A battery camera's keep-alive is renewed every 10 s during a stream**, the
+  app's cadence (measured in its live screen), where it was every 20 s against
+  the camera's 25 s window: a renewal lost to a slow request no longer risks
+  the camera sleeping mid-view.
 - **A refused wake or sleep is said at WARNING** with the status, where it
   was a bare False with the detail at DEBUG; and the retry no longer waits a
   second after its last attempt.
