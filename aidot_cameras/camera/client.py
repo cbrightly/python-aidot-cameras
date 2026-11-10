@@ -3388,6 +3388,11 @@ class CameraMixin(
         the MQTT ``lowPowerActiveStateReq``, which only lands if the camera is
         already connected.  Returns True if the request was accepted (HTTP 200).
         """
+        return await self._async_http_low_power("wakeup")
+
+    async def _async_http_low_power(self, status: str) -> bool:
+        """POST the low-power endpoint with ``status`` ``"wakeup"`` or
+        ``"sleep"``: the app's ``wakeUpOrSleep``, both directions."""
         # The wake endpoint (unlike recording/playback) DOES require owner (n.java:71).
         headers = self._leedarson_headers()
         headers["owner"] = self._owner_id()
@@ -3395,8 +3400,8 @@ class CameraMixin(
             f"{self._smarthome_base}/api/ipc/devices/"
             f"{self.device_id}/lowPowerActiveState"
         )
-        body = json.dumps({"deviceId": self.device_id, "status": "wakeup"})
-        return await self._async_post_ok(url, headers, body, label="http wake")
+        body = json.dumps({"deviceId": self.device_id, "status": status})
+        return await self._async_post_ok(url, headers, body, label=f"http {status}")
 
     def _live_stream_param_request(self):
         """Build ``(url, headers, body)`` for the liveStreamParam provision call.
@@ -3440,13 +3445,58 @@ class CameraMixin(
         attribute paths; this adds the reliable cloud-side channel.  Non-battery
         cameras are always reachable, so this is a no-op for them.
         """
+        return await self._async_low_power("wakeup", retries)
+
+    async def _async_low_power(self, status: str, retries: int) -> bool:
+        """The wake-or-sleep request with the app's retry: ``retries`` attempts
+        a second apart, True on the first the cloud accepts. A refusal is
+        said at WARNING once, with the status, so the caller's error has a
+        reason behind it in the log. A no-op (True) on mains cameras, which
+        never sleep."""
         if not self.is_battery_camera:
             return True
-        for _attempt in range(max(1, retries)):
-            if await self._async_http_wake():
+        attempts = max(1, retries)
+        for attempt in range(attempts):
+            if await self._async_http_low_power(status):
                 return True
-            await asyncio.sleep(1.0)
+            if attempt < attempts - 1:
+                await asyncio.sleep(1.0)
+        _LOGGER.warning(
+            "camera %s: the cloud refused the %s request %d time(s) (details at DEBUG)",
+            self.device_id,
+            status,
+            attempts,
+        )
         return False
+
+    async def async_keep_awake(self, seconds: float) -> None:
+        """Keep a battery camera awake for ``seconds`` after a wake, the way
+        the app does between its wake and its live view: renew the camera's
+        keep-alive (``setKeepAliveTime``, a 25 s window) every 10 s. Ends
+        early once a stream of ours is active, whose own renewals take over,
+        and never runs on a mains camera. Best-effort: a renewal that fails is
+        retried at the next tick."""
+        if not self.is_battery_camera or seconds <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        end = loop.time() + seconds
+        while loop.time() < end and not getattr(self, "_streaming_active", False):
+            await self._async_set_keep_alive()
+            await asyncio.sleep(min(10.0, max(0.0, end - loop.time())))
+
+    async def async_sleep_camera(self, retries: int = 2) -> bool:
+        """Send a battery camera back to sleep now, instead of ~25 s after its
+        last keep-alive.
+
+        The same cloud endpoint as :meth:`async_wake_camera` with
+        ``status: "sleep"``: the app sends it when the user leaves a battery
+        camera's live view. Useful after a scheduled recording, when nobody
+        will watch again soon. A camera that is streaming to someone keeps
+        its session until that ends; this only stops the camera waiting up for
+        a viewer that is not coming. Non-battery cameras never sleep, so this
+        is a no-op for them.
+        """
+        return await self._async_low_power("sleep", retries)
 
     async def _async_get_mqtt_url(self) -> Optional[str]:
         # Fetch and cache the WSS MQTT broker URL (and MQTT credentials) from

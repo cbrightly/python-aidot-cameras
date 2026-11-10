@@ -6,6 +6,28 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.2.0]
+
+One addition to the public surface, for scheduled views of battery cameras.
+
+### Added
+- **`async_sleep_camera()`**: send a battery camera back to sleep now, the
+  app's ``wakeUpOrSleep(..., sleep)``, through the same cloud low-power
+  endpoint `async_wake_camera` uses with ``status: "sleep"``. The camera
+  otherwise sleeps about 25 s after its last keep-alive. A no-op on mains
+  cameras. Pairs with `async_wake_camera` for a scheduled recording: wake
+  ahead of it (a battery camera's wake can take 40 s or more, which a 60 s
+  recording window otherwise spends waiting), record, sleep.
+- **`async_keep_awake(seconds)`**: renew a battery camera's keep-alive every
+  10 s for a while after a wake, as the app does between its wake and its
+  live view, ending early once a stream of ours takes over. A wake alone lets
+  the camera sleep again about 25 s later.
+
+### Changed
+- **A refused wake or sleep is said at WARNING** with the status, where it
+  was a bare False with the detail at DEBUG; and the retry no longer waits a
+  second after its last attempt.
+
 ## [1.1.1]
 
 Two things the official app does that the library did not (the camera's own
