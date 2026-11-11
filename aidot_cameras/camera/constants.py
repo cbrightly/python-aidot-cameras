@@ -166,6 +166,15 @@ IOTYPE_USER_IPCAM_SPEAKERSTART = 0x350  # 848
 IOTYPE_USER_IPCAM_SPEAKERSTOP = 0x351  # 849
 #: The SPEAKERSTART ack on the WebRTC transports; 0x352 is the TUTK one.
 IOTYPE_USER_IPCAM_SPEAKERSTART_WEB_RTC_RESP = 0x353  # 851
+#: Delete card recordings (the app's deleteRecord): 0x4b7 asks, 0x4b8 answers
+#: with one byte, 0 for done.
+IOTYPE_USER_IPCAM_DELLISTEVENT_REQ = 0x4B7
+IOTYPE_USER_IPCAM_DELLISTEVENT_RESP = 0x4B8
+#: Thumbnails of card recordings (the app's getThumbnais, sent as its
+#: "custom command"): 0x4b9 asks for a list of recordings, 0x4ba brings one
+#: picture per reply.
+IOTYPE_USER_IPCAM_SD_THUMBNAIL_REQ = 0x4B9
+IOTYPE_USER_IPCAM_SD_THUMBNAIL_RESP = 0x4BA
 IOTYPE_USER_IPCAM_HASLISTEVENT_REQ = 0x4B5
 IOTYPE_USER_IPCAM_HASLISTEVENT_RESP = 0x4B6
 IOTYPE_USER_IPCAM_PTZ_COMMAND = 0x1001  # 4097

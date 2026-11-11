@@ -12,11 +12,20 @@ are all ordinary, and each of them has to arrive in a media browser as an empty
 list rather than as a traceback.
 """
 
+import calendar
 import logging
+import struct
 import time
 from datetime import datetime, UTC
 from typing import Any, List, Optional
 
+from .constants import (
+    IOTYPE_USER_IPCAM_DELLISTEVENT_REQ,
+    IOTYPE_USER_IPCAM_DELLISTEVENT_RESP,
+    IOTYPE_USER_IPCAM_SD_THUMBNAIL_REQ,
+    IOTYPE_USER_IPCAM_SD_THUMBNAIL_RESP,
+)
+from .controls import _session_is_live as _control_session_is_live
 from .sd_events import (
     HASLISTEVENT_REQ_CMD,
     HASLISTEVENT_RESP_CMD,
@@ -160,17 +169,15 @@ def _plausible(record: Any, lo: float, hi: float) -> bool:
 
 
 def _session_is_live(session: Any) -> bool:
-    """Is this session object one that could still carry a request?
-
-    Only SDES sessions publish ``is_alive``, so a session already torn down is
-    caught on that transport and not on DTLS. That asymmetry is fine here and
-    must stay fine at every caller: this is a cheap early-out, never the thing
-    that keeps a dead channel from being reported as an empty card. ``answered``
-    does that, on every transport.
-    """
-    if session is None:
+    """Is this session one that could still carry a request? One rule for
+    both transports (controls._session_is_live): not stopped, and its peer
+    connection, where it has one, neither closed nor failed. An SDES session
+    also publishes ``is_alive``. A cheap early-out, never the thing that
+    keeps a dead channel from being reported as an empty card: ``answered``
+    does that."""
+    if session is None or getattr(session, "is_alive", True) is False:
         return False
-    return getattr(session, "is_alive", True) is not False
+    return _control_session_is_live(session)
 
 
 class _CameraSdMixin:
@@ -420,3 +427,169 @@ class _CameraSdMixin:
             start_ts=start_ts,
             end_ts=end_ts,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Thumbnails and deletion of card recordings
+# --------------------------------------------------------------------------- #
+
+#: The thumbnail request names recordings by their start as epoch
+#: milliseconds (the app's Long per recording); the reply carries the request
+#: channel, the time back, and the picture.
+_THUMB_HEADER = struct.Struct("<Iq")
+
+
+def _record_epoch_ms(record: Any) -> int:
+    """A record's UTC start as epoch milliseconds."""
+    fields = (
+        record.year,
+        record.month,
+        record.day,
+        record.hour,
+        record.minute,
+        record.second,
+    )
+    return calendar.timegm((*fields, 0, 0, 0)) * 1000
+
+
+def _record_stime(record: Any) -> bytes:
+    """A record's start as the TUTK STimeDay the delete request carries."""
+    from .sd_playback import _java_day_of_week
+
+    return struct.pack(
+        "<HBBBBBB",
+        record.year,
+        record.month,
+        record.day,
+        _java_day_of_week(record.year, record.month, record.day),
+        record.hour,
+        record.minute,
+        record.second,
+    )
+
+
+def sd_thumbnail_request(records: "list", channel: int) -> bytes:
+    """The 0x4b9 payload: request channel (u32 LE) then each recording's start
+    as epoch ms (i64 LE), as the app's getThumbnais builds it."""
+    out = struct.pack("<I", channel)
+    for r in records:
+        out += struct.pack("<q", _record_epoch_ms(r))
+    return out
+
+
+def parse_sd_thumbnail(payload: bytes) -> "Optional[tuple[int, int, bytes]]":
+    """A 0x4ba reply as (request channel, start epoch ms, picture bytes), or
+    None when it is too short to be one. Read as the app reads it: 4 bytes,
+    8 bytes, then everything else is the picture."""
+    if len(payload) < _THUMB_HEADER.size:
+        return None
+    channel, when = _THUMB_HEADER.unpack_from(payload, 0)
+    return channel, when, bytes(payload[_THUMB_HEADER.size :])
+
+
+def sd_delete_request(
+    records: "list", *, delete_type: int = 0, event_type: int = 0
+) -> bytes:
+    """The 0x4b7 payload, as the app's deleteRecord builds it: u32 channel 0,
+    u32 count, u8 0, u8 1, u8 count, u8 delete type, i16 event type, then per
+    recording its STimeDay (8 bytes) and its index (i16). The app sends delete
+    type 0 and the list page's event type."""
+    n = len(records)
+    out = struct.pack("<IIBBBBh", 0, n, 0, 1, n & 0xFF, delete_type & 0xFF, event_type)
+    for i, r in enumerate(records):
+        out += _record_stime(r) + struct.pack("<h", i)
+    return out
+
+
+class _CameraSdExtrasMixin:
+    """Thumbnails and deletion for card recordings; mixed into CameraMixin."""
+
+    async def async_get_sd_thumbnails(
+        self,
+        records: "list",
+        *,
+        session: Any = None,
+        timeout: float = 8.0,
+        more_timeout: float = 3.0,
+    ) -> "dict[Any, bytes]":
+        """Pictures for ``records`` (SdEvent), keyed by record, from the camera
+        over a live session.
+
+        The app asks for these from its live screen, which already holds the
+        session; a caller here does the same, passing the session or relying
+        on the one the serve loop holds. Each reply carries one picture and
+        the recording's start it belongs to; a recording the camera has no
+        picture for simply gets no reply. Returns what came back, possibly
+        nothing: an empty dict means no pictures, not a failure.
+        """
+        if session is None:
+            session = getattr(self, "_stream_session", None)
+        if not records or not _session_is_live(session):
+            return {}
+        by_ms = {_record_epoch_ms(r): r for r in records}
+        channel = (getattr(self, "_sd_thumb_channel", 0) % 1000) + 1
+        self._sd_thumb_channel = channel
+        try:
+            replies = await session.async_avio_request_all(
+                IOTYPE_USER_IPCAM_SD_THUMBNAIL_REQ,
+                sd_thumbnail_request(records, channel),
+                response_cmd=IOTYPE_USER_IPCAM_SD_THUMBNAIL_RESP,
+                timeout=timeout,
+                more_timeout=more_timeout,
+                max_replies=len(records),
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "SD thumbnails failed for %s: %s", getattr(self, "device_id", "?"), exc
+            )
+            return {}
+        out: "dict[Any, bytes]" = {}
+        for reply in replies:
+            parsed = parse_sd_thumbnail(reply.payload)
+            if parsed is None:
+                continue
+            _ch, when, picture = parsed
+            record = by_ms.get(when)
+            if record is not None and picture:
+                out[record] = picture
+        return out
+
+    async def async_delete_sd_recordings(
+        self,
+        records: "list",
+        *,
+        session: Any = None,
+        timeout: float = 8.0,
+    ) -> "Optional[bool]":
+        """Delete ``records`` from the card. True when the camera said done,
+        False when it refused, None when there was no live session to ask
+        through or it did not answer. Destructive and unconfirmed by the
+        camera beyond its one status byte; callers should ask the user first.
+        """
+        if session is None:
+            session = getattr(self, "_stream_session", None)
+        if not records or not _session_is_live(session):
+            return None
+        event_type = int(getattr(records[0], "event", 0)) if len(records) == 1 else 0
+        try:
+            reply = await session.async_avio_request(
+                IOTYPE_USER_IPCAM_DELLISTEVENT_REQ,
+                sd_delete_request(records, event_type=event_type),
+                response_cmd=IOTYPE_USER_IPCAM_DELLISTEVENT_RESP,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "SD delete failed for %s: %s", getattr(self, "device_id", "?"), exc
+            )
+            return None
+        if reply is None:
+            return None
+        ok = bool(reply.payload) and reply.payload[0] == 0
+        _LOGGER.info(
+            "camera %s: delete of %d card recording(s) %s",
+            getattr(self, "device_id", "?"),
+            len(records),
+            "done" if ok else "refused (%r)" % bytes(reply.payload[:4]),
+        )
+        return ok

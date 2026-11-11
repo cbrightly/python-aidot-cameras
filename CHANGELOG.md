@@ -6,6 +6,34 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.3.0]
+
+The last of the app's camera traffic the library did not speak
+(docs/PROTOCOL-INVENTORY.md): thumbnails and deletion of card recordings, and
+the cloud's event notices. Stream paths are unchanged.
+
+### Added
+- **`async_get_sd_thumbnails(records)`**: the pictures the camera holds for
+  card recordings, over a live session, as the app asks from its live screen
+  (control command 0x4b9: a request channel then each recording's start as
+  epoch milliseconds; one 0x4ba reply per picture carrying the channel, the
+  start and the JPEG). Keyed by record; a recording without a picture is
+  simply absent.
+- **`async_delete_sd_recordings(records)`**: delete card recordings, as the
+  app's delete does (0x4b7: a 14-byte head then each recording's STimeDay and
+  index; 0x4b8 answers one byte, 0 for done). True, False for refused, None
+  for no session or no answer. Destructive; a consumer should confirm first.
+- **`async_watch_events(callback)` / `async_stop_watching_events()`**: call
+  back on the loop when the cloud announces an event for this camera on the
+  account's topics (`devEventNotif`, `eventNotify`), and
+  **`poke_motion_poll()`**, which makes the motion poll run now. Whether
+  these cameras announce events there is not yet measured; the watch costs
+  nothing when they do not.
+
+### Changed
+- The cloud event-clip lookup logs the reply's code and URL count at DEBUG,
+  not the reply itself (which carries the clip's signed CDN URL).
+
 ## [1.2.0]
 
 One addition to the public surface, for scheduled views of battery cameras.

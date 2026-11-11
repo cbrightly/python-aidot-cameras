@@ -696,11 +696,13 @@ class _CameraControlsMixin:
         # same session; the second must not send the command twice.
         if getattr(self, "_resolution_applied_to", None) is session:
             return
-        self._resolution_applied_to = session
         try:
             if session._avio_cmd(
                 IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ, struct.pack("<IB3x", 0, q)
             ):
+                # Latched only once the command left: a channel not yet up
+                # gets it again at the next prepare.
+                self._resolution_applied_to = session
                 _LOGGER.debug("re-applied remembered resolution %s", quality)
         except Exception:
             _LOGGER.debug("could not re-apply resolution %s", quality, exc_info=True)

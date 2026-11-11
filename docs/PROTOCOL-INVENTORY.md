@@ -34,7 +34,7 @@ Messages the app's IPC service sends or handles, by method name.
 | `deviceControlByDevActionReq` | app -> camera | SD card status / format from the card page (`SDEventsPresenter`) | no: card status is read through the AVIO listing; format is not offered |
 | `devEventNotif` | camera -> app | device event push over the app's Netty socket (`NettyManager`) | no: the integration reads the cloud event list instead (polling); a push path would make motion events faster. Worth a look |
 | `eventNotify` | cloud -> app | event list changed (`IpcServiceImpl$5`, `$7`) | no: same as above |
-| `thumbnailPhotoNotify` | camera -> app | a thumbnail is ready (`IpcServiceImpl$9`) | no: snapshots come from the live stream; the app's thumbnails go with the SD card browser (AVIO `0x4b9`, section 2) |
+| `thumbnailPhotoNotify` | in-app only | the app's own event bus notice that a thumbnail it received over the stream (`0x4ba`, section 2) was saved; not a cloud or camera message | n/a |
 | `updateOtaStatusNotify` / `updateOtaStautsNotif` | camera -> app | firmware update progress | no (see 5) |
 | `devUnbindNotif` | cloud -> app | device removed from the account | yes since library 1.1.1 (`async_watch_unbind`) and integration 2.40.0 (re-syncs the device list on the notice) |
 | `devDiscoveryReq` | app -> LAN | LAN discovery broadcast (lights and cameras) | yes |
@@ -58,8 +58,8 @@ Hex is the TUTK IOTYPE; the struct is TUTK's unless noted.
 | `PTZ_COMMAND` | `0x1001` | pan / tilt / zoom / presets | yes (pan, tilt, zoom; presets not exposed) |
 | `LISTEVENT` / `HASLISTEVENT` | `0x318`, `0x4b5` | SD card recording list and day map | yes |
 | `RECORD_PLAYCONTROL` | `0x31a` | play / pause / seek a card recording | yes |
-| `DELLISTEVENT` | `0x4b7` | delete card recordings | no: the integration does not offer deletion. Could be a service; low demand |
-| `CUSTOM_COMMAND` (thumbnails) | `0x4b9` | ask for thumbnails of card recordings: a request channel id (int32 LE) followed by the recordings' start times (int64 LE each); `0x4ba` acknowledges, and each picture then arrives out of band as a `thumbnailPhotoNotify` over MQTT (`deviceId`, `time`, `path`, `type`, `command`), the camera having uploaded it | skip for now: it needs a live session to the camera at browse time (the app asks from its live screen), so a media-browser visit would cost a cold open and the camera's one media slot. Documented so it can be picked up if wanted |
+| `DELLISTEVENT` | `0x4b7` | delete card recordings: u32 channel, u32 count, u8 0, u8 1, u8 count, u8 delete type (0), i16 the list page's event type, then per recording its STimeDay (Java weekday, Sunday 1) and index; `0x4b8` answers one byte, 0 for done | yes since library 1.3.0 (`async_delete_sd_recordings`) and integration 2.41.0 (`aidot.delete_sd_recording`) |
+| `CUSTOM_COMMAND` (thumbnails) | `0x4b9` | ask for thumbnails of card recordings: a request channel id (int32 LE) followed by the recordings' start times (epoch ms, int64 LE each); each `0x4ba` reply carries the channel, one start time and that recording's JPEG (the app's handler reads 4 + 8 bytes then the picture, saves it and raises its in-app `thumbnailPhotoNotify`, which is not an MQTT message - an earlier version of this row said it was) | yes since library 1.3.0 (`async_get_sd_thumbnails`, DTLS sessions only: an SDES session reads one datagram at a time and cannot carry a picture) and integration 2.41.0 (fetched on a listing taken over a live session, shown in the media browser) |
 | `RT_RADAR_START` / `STOP` / `SDCARD_START` / `REPORT` | `0x528`-`0x52f` | the radar / tracking overlay the app draws for models with a radar | skip: no supported model reports one |
 
 Commands the library sends that the app does not: none on the live path. The
@@ -120,10 +120,6 @@ stream.
   the cameras also announce events on the MQTT topics is unmeasured: a
   12-minute idle capture and a provoked PTZ pan showed none, and a real
   motion event has not yet been captured. Open.
-- **Card recording thumbnails** (`0x4b9` + `thumbnailPhotoNotify`): protocol
-  understood (section 2), not implemented: a thumbnail request needs a live
-  session, which a media-browser visit does not have.
-- **Card recording deletion** (`0x4b7`): browser polish, low demand.
 - **Cloud recordings via the app's streaming server**: the HTTP path works;
   no reason to change.
 - **Radar overlay, BLE, panorama stitching, IPv6:** out of scope for the

@@ -66,7 +66,7 @@ from .sdes import (
     SdesSession,
 )  # re-exported (split into sdes.py); also the SDES return type
 from .controls import _CameraControlsMixin, control_session
-from .sd_listing import _CameraSdMixin
+from .sd_listing import _CameraSdExtrasMixin, _CameraSdMixin
 from .sd_playback import _CameraSdPlaybackMixin
 from .webrtc_open import _WebRTCOpenMixin
 from .sdes_open import _SdesOpenMixin
@@ -2025,7 +2025,11 @@ async def _dtls_serve_loop_serve_cycle(
                     exc_info=True,
                 )
             ps.wfile = None
-            ps.mux_thread.join(timeout=2.0)
+            # Off the loop: a mux thread stuck in a write would otherwise hold
+            # every coroutine in the process for up to two seconds.
+            await asyncio.get_running_loop().run_in_executor(
+                None, ps.mux_thread.join, 2.0
+            )
             ps.mux_thread = ps.stop_flag = None
             if _mode == "stdout" and _mux_ended and _mux_state.get("failed"):
                 # Whoever read our stdout has gone (go2rtc kills an exec
@@ -2082,7 +2086,11 @@ async def _dtls_serve_loop_serve_cycle(
             # itself raised, join() raises "cannot join thread before it
             # is started", which would replace the real exception AND skip
             # the session stop below, leaking the camera's session.
-            ps.mux_thread.join(timeout=2.0)
+            # Off the loop: a mux thread stuck in a write would otherwise hold
+            # every coroutine in the process for up to two seconds.
+            await asyncio.get_running_loop().run_in_executor(
+                None, ps.mux_thread.join, 2.0
+            )
         self._stream_session = None
         try:
             await ps.session.stop()
@@ -2697,6 +2705,7 @@ def _call_guarded(callback) -> None:
 class CameraMixin(
     _CameraControlsMixin,
     _CameraSdMixin,
+    _CameraSdExtrasMixin,
     _CameraSdPlaybackMixin,
     _WebRTCOpenMixin,
     _SdesOpenMixin,
@@ -4148,7 +4157,10 @@ class CameraMixin(
             try:
                 _, _wst = await self._persistent_request(_wake_items, [], 2.0)
                 _connected = _wst.get("error") != _NO_PERSISTENT_MQTT
-                if _connected:
+                if _mqtt_publish_delivered(_wst):
+                    # Only a wake the broker took counts as the camera woken;
+                    # a connect timeout or a failed publish must not stop the
+                    # next command from waking it again.
                     self._last_wake_mono = _time.monotonic()
             except Exception:
                 # A failed wake must not stop the command: on a camera that is
@@ -4294,6 +4306,9 @@ class CameraMixin(
         if lan is not None:
             try:
                 if await lan.async_set_attributes({attr: value}):
+                    # The same optimistic state the cloud path records below,
+                    # so a switch does not snap back until the next poll.
+                    self.status.update_from_camera_attributes({attr: value})
                     return True
             except Exception as _exc:
                 _LOGGER.debug(
@@ -5114,10 +5129,11 @@ class CameraMixin(
                 body = await _fetch()  # retry once with the refreshed token
 
             _LOGGER.debug(
-                "getEventVideoUrl raw for %s uuid=%s: %s",
+                "getEventVideoUrl code=%s for %s uuid=%s: %d url(s)",
+                body.get("code"),
                 self.device_id,
                 event_uuid,
-                body,
+                len((body.get("data") or {}).get("eventUrlList") or []),
             )
 
             if body.get("code") != 200:
@@ -5569,6 +5585,11 @@ class CameraMixin(
             return
         self._motion_active = True
         self._motion_seen = {}
+        # The poke the event watch sets (poke_motion_poll): made here so a
+        # notice that lands before the first wait is not lost, cleared at the
+        # start of each poll so one that lands during a poll runs the next.
+        self._motion_poke = asyncio.Event()
+        self._motion_last_poll = 0.0
         self._motion_task = asyncio.ensure_future(self._motion_poll_loop(lookback_s))
 
     async def async_watch_unbind(self, callback: "Callable[[], None]") -> bool:
@@ -5631,6 +5652,69 @@ class CameraMixin(
         self._unbind_watch = (pm, pm.add_handler(_handler))
         return True
 
+    async def async_watch_events(self, callback: "Callable[[], None]") -> bool:
+        """Call ``callback()`` on the loop when the cloud announces an event
+        for this camera on the account's topics (``devEventNotif`` or
+        ``eventNotify``), so a consumer can poll the event list at once
+        instead of at its next interval. Whether these cameras announce their
+        events there is not yet measured; the watch costs nothing if they do
+        not. Returns False when there is no MQTT session to listen on.
+        """
+        pm = await self._get_persistent_mqtt()
+        if pm is None:
+            return False
+        device_id = self.device_id
+        loop = asyncio.get_running_loop()
+
+        def _handler(topic, payload) -> None:
+            text = str(payload)[:600]
+            if "devEventNotif" not in text and "eventNotify" not in text:
+                return
+            try:
+                msg = json.loads(payload)
+            except Exception:
+                return
+            if (msg.get("method") or "") not in ("devEventNotif", "eventNotify"):
+                return
+            inner = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
+            src = str(msg.get("srcAddr") or "")
+            dev = (
+                inner.get("devId")
+                or inner.get("deviceId")
+                or msg.get("devId")
+                or (src.rsplit(".", 1)[-1] if src else None)
+            )
+            if dev and dev != device_id:
+                return
+            _LOGGER.info(
+                "camera %s: event notice %s (keys %s)",
+                device_id,
+                msg.get("method"),
+                sorted(inner.keys())[:8],
+            )
+            loop.call_soon_threadsafe(_call_guarded, callback)
+
+        await self.async_stop_watching_events()
+        await pm.subscribe([f"iot/v1/c/{self.user_id}/#"])
+        self._event_watch = (pm, pm.add_handler(_handler))
+        return True
+
+    async def async_stop_watching_events(self) -> None:
+        """Stop the ``async_watch_events`` listener, if any."""
+        watch = getattr(self, "_event_watch", None)
+        if watch is None:
+            return
+        self._event_watch = None
+        pm, handler = watch
+        pm.remove_handler(handler)
+
+    def poke_motion_poll(self) -> None:
+        """Ask the motion poll loop to poll now rather than at its next
+        interval; a no-op when it is not running."""
+        ev = getattr(self, "_motion_poke", None)
+        if ev is not None:
+            ev.set()
+
     async def async_stop_watching_unbind(self) -> None:
         """Stop the ``async_watch_unbind`` listener, if any. Touches only the
         connection the handler was added to; never builds one."""
@@ -5664,6 +5748,10 @@ class CameraMixin(
 
         primed = False
         while self._motion_active:
+            poke = getattr(self, "_motion_poke", None)
+            if poke is not None:
+                poke.clear()
+            self._motion_last_poll = asyncio.get_running_loop().time()
             try:
                 now = int(_time.time() * 1000)
                 items = await self.async_get_cloud_recordings(
@@ -5694,7 +5782,17 @@ class CameraMixin(
             except Exception as exc:
                 _LOGGER.debug("motion poll error for %s: %s", self.device_id, exc)
             try:
-                await asyncio.sleep(self._motion_interval)
+                # Interruptible: an event notice (poke_motion_poll) ends the
+                # wait early so the poll runs now. Not cleared here: a poke
+                # that landed during the poll above must end this wait at
+                # once; the clear is at the top of the loop, before a poll.
+                if poke is None:
+                    await asyncio.sleep(self._motion_interval)
+                else:
+                    try:
+                        await asyncio.wait_for(poke.wait(), self._motion_interval)
+                    except TimeoutError:
+                        pass
             except asyncio.CancelledError:
                 return
 

@@ -55,11 +55,11 @@ from .rtsp_publish import (
     is_publishable_url,
 )
 from .protocol import (
+    dispatch_avio_frames,
     ipc_envelope,
     avio_frame,
     avio_header,
     mask_sdp_secrets,
-    AVIO_HDR_LEN,
     REMB_TARGET_BPS,
     AvioResponseRouter,
     NackTracker,
@@ -530,37 +530,8 @@ def _sctp_parse_init_ack(pkt: bytes, state: dict) -> Optional[bytes]:
 
 
 def _dispatch_sctp_avio(responses, payload) -> bool:
-    """Offer an inbound SCTP DATA payload to the AVIO response router.
-
-    This is where the camera's replies actually arrive on SDES: an encrypted
-    SCTP DATA chunk (PPID 53) on the same channel we send LIVING, the heartbeat
-    and SPEAKERSTART on - not the TUTK-audio framing the audio forward path
-    watches. Wiring only the latter is why a camera that answered SPEAKERSTART
-    in moments looked silent.
-
-    True if it answered something we were waiting for. Never raises and never
-    blocks: it runs inline on the bridge receive loop, where a bad frame must
-    not be able to take the media path down with it.
-    """
-    if responses is None or not payload:
-        return False
-    answered = False
-    try:
-        view = memoryview(payload)
-        while len(view) >= AVIO_HDR_LEN:
-            frame = parse_avio_response(bytes(view))
-            if frame is None:
-                break
-            if responses.dispatch(bytes(view)):
-                answered = True
-            # One chunk can carry more than one frame: 5377 declares a 12-byte
-            # payload and has been seen arriving in a 140-byte chunk.  Reading
-            # only the first would lose a reply batched behind a notify, which
-            # presents as the camera intermittently not answering.
-            view = view[AVIO_HDR_LEN + len(frame.payload) :]
-    except Exception:
-        return answered
-    return answered
+    """SDES control frames: see :func:`protocol.dispatch_avio_frames`."""
+    return dispatch_avio_frames(responses, payload)
 
 
 def _widen_media_rcvbuf(sock, kind: str, device_id: str = "?") -> int:

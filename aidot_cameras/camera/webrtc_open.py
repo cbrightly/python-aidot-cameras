@@ -45,6 +45,7 @@ from .constants import (
 from .sdes_open import _answer_sdp_can_nominate
 from .webrtc import WebRTCSession, dtls_send_avio
 from .protocol import (
+    dispatch_avio_frames,
     ipc_envelope,
     mask_sdp_secrets,
     AvioResponseRouter,
@@ -2929,7 +2930,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
         def _on_remote_dc_message(message) -> None:
             try:
                 if isinstance(message, (bytes, bytearray)):
-                    ps._avio_responses.dispatch(bytes(message))
+                    dispatch_avio_frames(ps._avio_responses, bytes(message))
                     ps._trace(
                         f"DC[remote:{channel.label}] RX {len(message)}B"
                         f" cmd={_avio_cmd_id(message)}"
@@ -3018,7 +3019,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
         def _on_kvs_dc_message(message) -> None:
             try:
                 if isinstance(message, (bytes, bytearray)):
-                    ps._avio_responses.dispatch(bytes(message))
+                    dispatch_avio_frames(ps._avio_responses, bytes(message))
                     ps._trace(
                         f"DC[{_dc_label}] RX {len(message)}B"
                         f" cmd={_avio_cmd_id(message)}"

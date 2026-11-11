@@ -3328,3 +3328,30 @@ def mask_sdp_secrets(sdp: str) -> str:
                     break
         out.append(ln)
     return "".join(out)
+
+
+def dispatch_avio_frames(responses, payload) -> bool:
+    """Offer every AVIO frame in one inbound control message to ``responses``.
+
+    One SCTP message can carry more than one frame: a 12-byte SESSION_MODE
+    notify has been seen arriving with a reply batched behind it in a
+    140-byte chunk. Reading only the first loses the reply, which presents as
+    the camera intermittently not answering. Both transports' control
+    channels go through here. True if something waiting was answered; never
+    raises and never blocks (it runs inline on the receive path).
+    """
+    if responses is None or not payload:
+        return False
+    answered = False
+    try:
+        view = memoryview(payload)
+        while len(view) >= AVIO_HDR_LEN:
+            frame = parse_avio_response(bytes(view))
+            if frame is None:
+                break
+            if responses.dispatch(bytes(view)):
+                answered = True
+            view = view[AVIO_HDR_LEN + len(frame.payload) :]
+    except Exception:
+        return answered
+    return answered
