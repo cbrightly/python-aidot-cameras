@@ -32,8 +32,8 @@ Messages the app's IPC service sends or handles, by method name.
 | `getDevAttrReq` / `Resp` | app -> camera | read properties | yes |
 | `devActionReq` / `Resp` | app -> camera | actions: `wakeup`, `reboot`, `alarm` (siren), `ota` | partial: reboot and alarm yes; `wakeup` is done through `lowPowerActiveStateReq` instead; `ota` no (see 5) |
 | `deviceControlByDevActionReq` | app -> camera | SD card status / format from the card page (`SDEventsPresenter`) | no: card status is read through the AVIO listing; format is not offered |
-| `devEventNotif` | camera -> app | device event push over the app's Netty socket (`NettyManager`) | no: the integration reads the cloud event list instead (polling); a push path would make motion events faster. Worth a look |
-| `eventNotify` | cloud -> app | event list changed (`IpcServiceImpl$5`, `$7`) | no: same as above |
+| `devEventNotif` | cloud -> app | device event push over the app's Netty socket (`NettyManager`), which reads it only for a lights feature (`event == "rhythmsClose"`). Measured 2026-11-11 on the MQTT topics: during a battery camera's live view the cloud sends one for the camera every 5 s (keys `arguments`, `devId`, `event`) - a session heartbeat, not a detection | watched since library 1.3.0 (`async_watch_events`); from 1.3.1 a notice pokes the motion poll only when its event name says detection, and each new name is logged once |
+| `eventNotify` | camera -> app (TUTK) | event list changed, on the device channel (`IpcServiceImpl$5`, `$7`: `eventlist`, `timestamplist`, `messageCode`), not on MQTT | no: the integration polls the cloud event list; the MQTT watch also accepts the name in case the cloud relays it |
 | `thumbnailPhotoNotify` | in-app only | the app's own event bus notice that a thumbnail it received over the stream (`0x4ba`, section 2) was saved; not a cloud or camera message | n/a |
 | `updateOtaStatusNotify` / `updateOtaStautsNotif` | camera -> app | firmware update progress | no (see 5) |
 | `devUnbindNotif` | cloud -> app | device removed from the account | yes since library 1.1.1 (`async_watch_unbind`) and integration 2.40.0 (re-syncs the device list on the notice) |
@@ -116,10 +116,13 @@ stream.
   camera the user cannot reach; left to the app on purpose. The firmware
   version is shown.
 - **Event push (`devEventNotif` / `eventNotify`):** the integration polls the
-  cloud event list; the app gets a push over its own socket service. Whether
-  the cameras also announce events on the MQTT topics is unmeasured: a
-  12-minute idle capture and a provoked PTZ pan showed none, and a real
-  motion event has not yet been captured. Open.
+  cloud event list; the app gets a push over its own socket service. On the
+  MQTT topics the cloud sends a `devEventNotif` for a camera every 5 s while
+  its live view runs (measured 2026-11-11; a heartbeat, which the app does not
+  read for cameras), and nothing in a 12-minute idle capture or on a provoked
+  PTZ pan. Whether a detection is announced there too is still unmeasured;
+  the watch (library 1.3.1) pokes the poll only on a detection-named notice
+  and logs each new name once, so a motion test will show it.
 - **Cloud recordings via the app's streaming server**: the HTTP path works;
   no reason to change.
 - **Radar overlay, BLE, panorama stitching, IPv6:** out of scope for the

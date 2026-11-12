@@ -1322,6 +1322,32 @@ def _get_stream_slots() -> "asyncio.Semaphore":
 _KEEPALIVE_WINDOW_S = 25
 _KEEPALIVE_RENEW_S = 10
 
+# An event notice pokes the motion poll at most this often (the cloud's live
+# session heartbeat arrives every 5 s; a detection is rarer than that).
+_EVENT_POKE_MIN_GAP_S = 10.0
+_EVENT_DETECTION_WORDS = (
+    "motion",
+    "human",
+    "person",
+    "pet",
+    "sound",
+    "alarm",
+    "detect",
+    "vehicle",
+    "ring",
+    "doorbell",
+    "pir",
+    "cry",
+)
+
+
+def _event_name_is_detection(name: str) -> bool:
+    """Whether an event notice's name says a detection happened (the names
+    the cloud uses are not documented; the periodic live heartbeat does not
+    match any of these words)."""
+    low = name.lower()
+    return any(w in low for w in _EVENT_DETECTION_WORDS)
+
 
 def _ack_matches_seq(msg, seq):
     """Is ``msg`` the device's answer to the command we sent as ``seq``?
@@ -5665,6 +5691,8 @@ class CameraMixin(
             return False
         device_id = self.device_id
         loop = asyncio.get_running_loop()
+        seen_names: set[str] = set()
+        last_poke = [float("-inf")]
 
         def _handler(topic, payload) -> None:
             text = str(payload)[:600]
@@ -5686,12 +5714,30 @@ class CameraMixin(
             )
             if dev and dev != device_id:
                 return
-            _LOGGER.info(
-                "camera %s: event notice %s (keys %s)",
-                device_id,
-                msg.get("method"),
-                sorted(inner.keys())[:8],
-            )
+            name = str(
+                inner.get("event") or inner.get("eventType") or inner.get("type") or ""
+            )[:40]
+            # Measured 2026-11-11: during a live view the cloud sends a
+            # devEventNotif for the camera every 5 s (a session heartbeat,
+            # not a detection), and the app itself reads devEventNotif only
+            # for a lights feature. So a notice pokes the poll only when its
+            # name says detection, and each new name is logged once so the
+            # vocabulary can be read off an INFO log.
+            if name not in seen_names:
+                seen_names.add(name)
+                _LOGGER.info(
+                    "camera %s: event notice %s event=%r (keys %s)",
+                    device_id,
+                    msg.get("method"),
+                    name,
+                    sorted(inner.keys())[:8],
+                )
+            if not _event_name_is_detection(name):
+                return
+            now = time.monotonic()
+            if now - last_poke[0] < _EVENT_POKE_MIN_GAP_S:
+                return
+            last_poke[0] = now
             loop.call_soon_threadsafe(_call_guarded, callback)
 
         await self.async_stop_watching_events()

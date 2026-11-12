@@ -6,6 +6,21 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.3.1]
+
+Measured on the first 1.3.0 deploy: during a battery camera's live view the
+cloud sends a `devEventNotif` for the camera every 5 s - a session heartbeat,
+not a detection - and the app itself reads `devEventNotif` only for a lights
+feature (`rhythmsClose`). 1.3.0 poked the motion poll on every notice, so the
+cloud event list was polled every 5 s for as long as the view ran, with an
+INFO line each time.
+
+### Fixed
+- An event notice pokes the motion poll only when its event name says
+  detection (motion, human, person, pet, sound, alarm, detect, vehicle, ring,
+  doorbell, pir, cry), at most once per 10 s. Each new event name is logged
+  once per camera at INFO, so the names the cloud uses can be read off a log.
+
 ## [1.3.0]
 
 The last of the app's camera traffic the library did not speak
