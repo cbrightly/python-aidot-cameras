@@ -80,7 +80,7 @@ The app's property bean lists these. "App writes" is from the app's
 | `sirenRing` | yes | yes | yes (siren) |
 | `alarmType` | yes | yes | yes (alarm / event kind) |
 | `trackingMode` | yes | yes | yes (PTZ tracking) |
-| `SdcardRecord_Type` | yes | yes | partial: read for the card browser; the recording mode (continuous / event) is not exposed as a control |
+| `SdcardRecord_Type`, `SdcardRecord_Enable` | yes | no (not in the app's setDevAttrReq set; no settings page writes it) | read for the card browser; camera-managed, not a user control in the app either, so there is nothing to expose |
 | `StreamType` | yes | no (camera-written) | yes: reported back from the quality command; not yet shown by the integration |
 | `talkMode` | yes | yes (once) | no: half- vs full-duplex talk; our talk path is push-to-talk. Low value |
 | `spkNSLevel` | yes | no | no: speaker noise suppression level; read-only in the app |
@@ -134,5 +134,15 @@ The method names, command constants and property names were listed from the
 decompiled app with text search over its classes (the KVS WebRTC channel, the
 IPC service, the live presenter and the property bean) and matched by name
 against `aidot_cameras/camera/constants.py`, the MQTT method strings in the
-library and the integration, and the integration's entity descriptions. Dated
-2026-11-09; re-run the search when the app is updated.
+library and the integration, and the integration's entity descriptions. Dated 2026-11-09; a full completeness sweep re-ran it on 2026-11-13 and found
+no in-scope app capability unimplemented. Re-run the search when the app is
+updated.
+
+**Session provisioning the app uses and we do not, by design:** the app opens
+its live stream over AWS Kinesis Video (`/api/ipc/liveStream/liveStreamParam`
+returns KVS credentials, `liveType` 1) or, on TUTK-type cameras, a native
+ThroughTek IOTC P2P session (`/v5/deviceController/getP2pId` + the device's
+`p2pId`/`account`/`password`, read with `libIOTCAPIs`/`libAVAPIs`). This
+library deliberately bridges the same cameras over WebRTC/SDES in pure Python,
+so it needs neither path; every control and the card thumbnails ride the one
+WebRTC/SDES data channel instead (2026-11-13).
