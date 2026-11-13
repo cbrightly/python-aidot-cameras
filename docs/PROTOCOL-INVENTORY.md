@@ -59,7 +59,7 @@ Hex is the TUTK IOTYPE; the struct is TUTK's unless noted.
 | `LISTEVENT` / `HASLISTEVENT` | `0x318`, `0x4b5` | SD card recording list and day map | yes |
 | `RECORD_PLAYCONTROL` | `0x31a` | play / pause / seek a card recording | yes |
 | `DELLISTEVENT` | `0x4b7` | delete card recordings: u32 channel, u32 count, u8 0, u8 1, u8 count, u8 delete type (0), i16 the list page's event type, then per recording its STimeDay (Java weekday, Sunday 1) and index; `0x4b8` answers one byte, 0 for done | yes since library 1.3.0 (`async_delete_sd_recordings`) and integration 2.41.0 (`aidot.delete_sd_recording`) |
-| `CUSTOM_COMMAND` (thumbnails) | `0x4b9` | card-recording thumbnails, the app's `getPics`: a JSON body (`handlerName AppCallFirmware`, `service thumbnailPhoto`, `command get`, `channel` 27-31, `type`, `times` array of string start times, batched 15) sent on a SEPARATE native TUTK AV channel the app opens with `avClientStartEx`; the camera streams each JPEG back as AV frame data on that channel (`avRecvFrameData2`: 2-byte ver, 8-byte big-endian start, 4-byte big-endian length, then the picture), NOT as an IOCtrl reply | no, and not planned: this library bridges media over WebRTC/SDES and has no native TUTK AV channel to open or read, so the picture can never be received (measured 2026-11-12 by jadx of app 1.33.0; library 1.3.0/1.3.1 shipped a binary 0x4b9 that the camera ignored, reverted in 1.3.2) |
+| `CUSTOM_COMMAND` (thumbnails) | `0x4b9` | card-recording thumbnails, over the live session's data channel (the app's KVSWebRTCChannel.getThumbnais, not TUTK): a request channel id (int32 LE) then each recording's start time as epoch SECONDS (int64 LE each - the app divides its millisecond time by 1000); each `0x4ba` reply carries the channel (4B), the start time back (8B) and that recording's JPEG | yes - library 1.3.3 (`async_get_sd_thumbnails`) and integration 2.43.0. Works on SDES and DTLS (measured live 2026-11-13: an SDES camera returned real 640x352 JPEGs). 1.3.0/2.41.0 sent epoch MILLISECONDS, matched no recording and got blank replies, so it was removed in 1.3.2/2.42.0 and re-added here with the seconds fix |
 | `RT_RADAR_START` / `STOP` / `SDCARD_START` / `REPORT` | `0x528`-`0x52f` | the radar / tracking overlay the app draws for models with a radar | skip: no supported model reports one |
 
 Commands the library sends that the app does not: none on the live path. The
@@ -119,14 +119,10 @@ stream.
   cloud event list; the app gets a push over its own socket service. On the
   MQTT topics the cloud sends a `devEventNotif` for a camera every 5 s while
   its live view runs (measured 2026-11-11; a heartbeat, which the app does not
-  read for cameras). A real motion event in front of a PTZ (A001064) on
-  2026-11-12, with the camera's session active, produced no MQTT notice at
-  all - so motion is NOT announced on these topics; the app learns of it over
-  its own socket service. The only `devEventNotif` seen is
-  `event=sleep_status_changed` (a battery camera's sleep state), during a
-  session. The watch (library 1.3.1) stays - harmless, and it pokes the poll
-  on any future detection-named notice - but motion for these models is found
-  only by the integration's cloud event-list poll, not by MQTT.
+  read for cameras), and nothing in a 12-minute idle capture or on a provoked
+  PTZ pan. Whether a detection is announced there too is still unmeasured;
+  the watch (library 1.3.1) pokes the poll only on a detection-named notice
+  and logs each new name once, so a motion test will show it.
 - **Cloud recordings via the app's streaming server**: the HTTP path works;
   no reason to change.
 - **Radar overlay, BLE, panorama stitching, IPv6:** out of scope for the

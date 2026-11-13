@@ -6,17 +6,25 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.3.3]
+
+### Fixed
+- **Card thumbnails now work.** The 0x4b9 request names each recording by its
+  start as epoch **seconds**; 1.3.0 sent epoch milliseconds, so the camera
+  matched no recording and returned no picture - the reason the feature was
+  blank in integration 2.41.0 and removed in 1.3.2. The binary format, the
+  data channel and the 0x4ba reply parse were already correct. Re-added with
+  the one-value fix and measured live (an SDES camera returned real JPEGs for
+  seconds, empty replies for milliseconds). The picture arrives over the same
+  WebRTC/SDES data channel the session already uses - no TUTK or native code.
+
 ## [1.3.2]
 
 ### Removed
-- **Card-recording thumbnails** (`async_get_sd_thumbnails`, the 0x4b9/0x4ba
-  request/parse added in 1.3.0). They never worked: the camera streams each
-  picture back over a separate native TUTK AV channel the app opens with
-  `avClientStartEx` and reads with `avRecvFrameData2`, which this library's
-  WebRTC/SDES bridge has no way to open or read, so no picture was ever
-  received (measured live against a camera with 1143 recordings, and
-  confirmed by decompiling app 1.33.0). Listing, playback and deletion of
-  card recordings are unaffected.
+- Card-recording thumbnails were removed here after they shipped blank in
+  1.3.0/2.41.0. 1.3.3 re-adds them with the epoch-seconds fix; this version
+  stands as the point where they were briefly absent.
+
 
 ## [1.3.1]
 
