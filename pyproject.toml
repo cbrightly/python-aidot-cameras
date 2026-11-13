@@ -152,8 +152,10 @@ precision = 2
 # Floor at the current unit-tier coverage so it can only go up: a real
 # regression (a deleted test, or new code without a test) drops below this and
 # fails CI and the publish run. Raise it when coverage rises; never lower it to
-# make a red build pass. This gates both ci.yml and publish.yml.
-fail_under = 67
+# make a red build pass. This gates both ci.yml and publish.yml. The number is
+# the unit tier only (ci.yml runs it with `--cov=aidot_cameras` and e2e
+# excluded); the e2e tier covers more but is not what this gates.
+fail_under = 68
 
 [tool.ruff]
 target-version = "py311"
