@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.3.4]
+
 ### Added
 - **`AIDOT_SDES_NO_PROBE_GRACE_S`**: an opt-in, off-by-default faster abandon
   for the `no-probe` first-media stall (the camera answered but its ICE agent
