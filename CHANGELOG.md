@@ -6,6 +6,18 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.3.2]
+
+### Removed
+- **Card-recording thumbnails** (`async_get_sd_thumbnails`, the 0x4b9/0x4ba
+  request/parse added in 1.3.0). They never worked: the camera streams each
+  picture back over a separate native TUTK AV channel the app opens with
+  `avClientStartEx` and reads with `avRecvFrameData2`, which this library's
+  WebRTC/SDES bridge has no way to open or read, so no picture was ever
+  received (measured live against a camera with 1143 recordings, and
+  confirmed by decompiling app 1.33.0). Listing, playback and deletion of
+  card recordings are unaffected.
+
 ## [1.3.1]
 
 Measured on the first 1.3.0 deploy: during a battery camera's live view the

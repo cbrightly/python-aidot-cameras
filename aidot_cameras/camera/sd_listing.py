@@ -12,7 +12,6 @@ are all ordinary, and each of them has to arrive in a media browser as an empty
 list rather than as a traceback.
 """
 
-import calendar
 import logging
 import struct
 import time
@@ -22,8 +21,6 @@ from typing import Any, List, Optional
 from .constants import (
     IOTYPE_USER_IPCAM_DELLISTEVENT_REQ,
     IOTYPE_USER_IPCAM_DELLISTEVENT_RESP,
-    IOTYPE_USER_IPCAM_SD_THUMBNAIL_REQ,
-    IOTYPE_USER_IPCAM_SD_THUMBNAIL_RESP,
 )
 from .controls import _session_is_live as _control_session_is_live
 from .sd_events import (
@@ -430,26 +427,8 @@ class _CameraSdMixin:
 
 
 # --------------------------------------------------------------------------- #
-# Thumbnails and deletion of card recordings
+# Deletion of card recordings
 # --------------------------------------------------------------------------- #
-
-#: The thumbnail request names recordings by their start as epoch
-#: milliseconds (the app's Long per recording); the reply carries the request
-#: channel, the time back, and the picture.
-_THUMB_HEADER = struct.Struct("<Iq")
-
-
-def _record_epoch_ms(record: Any) -> int:
-    """A record's UTC start as epoch milliseconds."""
-    fields = (
-        record.year,
-        record.month,
-        record.day,
-        record.hour,
-        record.minute,
-        record.second,
-    )
-    return calendar.timegm((*fields, 0, 0, 0)) * 1000
 
 
 def _record_stime(record: Any) -> bytes:
@@ -468,25 +447,6 @@ def _record_stime(record: Any) -> bytes:
     )
 
 
-def sd_thumbnail_request(records: "list", channel: int) -> bytes:
-    """The 0x4b9 payload: request channel (u32 LE) then each recording's start
-    as epoch ms (i64 LE), as the app's getThumbnais builds it."""
-    out = struct.pack("<I", channel)
-    for r in records:
-        out += struct.pack("<q", _record_epoch_ms(r))
-    return out
-
-
-def parse_sd_thumbnail(payload: bytes) -> "Optional[tuple[int, int, bytes]]":
-    """A 0x4ba reply as (request channel, start epoch ms, picture bytes), or
-    None when it is too short to be one. Read as the app reads it: 4 bytes,
-    8 bytes, then everything else is the picture."""
-    if len(payload) < _THUMB_HEADER.size:
-        return None
-    channel, when = _THUMB_HEADER.unpack_from(payload, 0)
-    return channel, when, bytes(payload[_THUMB_HEADER.size :])
-
-
 def sd_delete_request(
     records: "list", *, delete_type: int = 0, event_type: int = 0
 ) -> bytes:
@@ -502,57 +462,13 @@ def sd_delete_request(
 
 
 class _CameraSdExtrasMixin:
-    """Thumbnails and deletion for card recordings; mixed into CameraMixin."""
+    """Deletion for card recordings; mixed into CameraMixin.
 
-    async def async_get_sd_thumbnails(
-        self,
-        records: "list",
-        *,
-        session: Any = None,
-        timeout: float = 8.0,
-        more_timeout: float = 3.0,
-    ) -> "dict[Any, bytes]":
-        """Pictures for ``records`` (SdEvent), keyed by record, from the camera
-        over a live session.
-
-        The app asks for these from its live screen, which already holds the
-        session; a caller here does the same, passing the session or relying
-        on the one the serve loop holds. Each reply carries one picture and
-        the recording's start it belongs to; a recording the camera has no
-        picture for simply gets no reply. Returns what came back, possibly
-        nothing: an empty dict means no pictures, not a failure.
-        """
-        if session is None:
-            session = getattr(self, "_stream_session", None)
-        if not records or not _session_is_live(session):
-            return {}
-        by_ms = {_record_epoch_ms(r): r for r in records}
-        channel = (getattr(self, "_sd_thumb_channel", 0) % 1000) + 1
-        self._sd_thumb_channel = channel
-        try:
-            replies = await session.async_avio_request_all(
-                IOTYPE_USER_IPCAM_SD_THUMBNAIL_REQ,
-                sd_thumbnail_request(records, channel),
-                response_cmd=IOTYPE_USER_IPCAM_SD_THUMBNAIL_RESP,
-                timeout=timeout,
-                more_timeout=more_timeout,
-                max_replies=len(records),
-            )
-        except Exception as exc:
-            _LOGGER.debug(
-                "SD thumbnails failed for %s: %s", getattr(self, "device_id", "?"), exc
-            )
-            return {}
-        out: "dict[Any, bytes]" = {}
-        for reply in replies:
-            parsed = parse_sd_thumbnail(reply.payload)
-            if parsed is None:
-                continue
-            _ch, when, picture = parsed
-            record = by_ms.get(when)
-            if record is not None and picture:
-                out[record] = picture
-        return out
+    Thumbnails are not here: the app fetches card thumbnails over a separate
+    native TUTK AV channel (avClientStartEx -> avRecvFrameData2), which this
+    library's WebRTC/SDES bridge has no equivalent for, so there is no way to
+    receive the image. See docs/PROTOCOL-INVENTORY.md.
+    """
 
     async def async_delete_sd_recordings(
         self,

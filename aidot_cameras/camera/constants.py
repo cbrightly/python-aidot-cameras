@@ -170,11 +170,10 @@ IOTYPE_USER_IPCAM_SPEAKERSTART_WEB_RTC_RESP = 0x353  # 851
 #: with one byte, 0 for done.
 IOTYPE_USER_IPCAM_DELLISTEVENT_REQ = 0x4B7
 IOTYPE_USER_IPCAM_DELLISTEVENT_RESP = 0x4B8
-#: Thumbnails of card recordings (the app's getThumbnais, sent as its
-#: "custom command"): 0x4b9 asks for a list of recordings, 0x4ba brings one
-#: picture per reply.
-IOTYPE_USER_IPCAM_SD_THUMBNAIL_REQ = 0x4B9
-IOTYPE_USER_IPCAM_SD_THUMBNAIL_RESP = 0x4BA
+# Card thumbnails (the app's getThumbnais, 0x4b9/0x4ba "custom command") are
+# NOT implemented: the camera streams the picture back over a separate native
+# TUTK AV channel (avClientStartEx -> avRecvFrameData2), which this library's
+# WebRTC/SDES bridge cannot open or read. See docs/PROTOCOL-INVENTORY.md.
 IOTYPE_USER_IPCAM_HASLISTEVENT_REQ = 0x4B5
 IOTYPE_USER_IPCAM_HASLISTEVENT_RESP = 0x4B6
 IOTYPE_USER_IPCAM_PTZ_COMMAND = 0x1001  # 4097
