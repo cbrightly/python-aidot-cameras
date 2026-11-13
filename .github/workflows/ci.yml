@@ -159,7 +159,9 @@ jobs:
           if want != "resolved" and got != want:
               sys.exit(f"requested python-aidot=={want} but {got} is installed")
           PY
-      # Coverage is informational (term-missing report); it does not gate the build.
+      # Coverage gates the build: pyproject's [tool.coverage.report] fail_under
+      # fails this step if unit-tier coverage drops below the floor. term-missing
+      # shows which lines regressed.
       # The suite includes tests/test_scripts_importable.py, which fails if any
       # scripts/ harness rots against the installed package (they all silently
       # broke at the 0.12.0 rename and CI never noticed).
