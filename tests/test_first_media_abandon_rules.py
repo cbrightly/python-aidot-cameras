@@ -26,8 +26,10 @@ import pytest
 from aidot_cameras.camera.sdes_open import (
     _NO_MEDIA_GRACE_S,
     _NO_MEDIA_STATUS,
+    _NO_PROBE_GRACE_S,
     _no_media_abandon_due,
     _no_media_shape,
+    _no_probe_abandon_due,
 )
 
 
@@ -60,6 +62,73 @@ def test_a_zero_or_negative_grace_disables_it(grace):
 def test_the_shipped_grace_is_twenty_seconds():
     # Sized from 165 first medias, the slowest 9.5 s after webrtcReq.
     assert _NO_MEDIA_GRACE_S == 20.0
+
+
+# --- the opt-in fast no-probe abandon -------------------------------------- #
+
+
+def _no_probe(**over):
+    kw = dict(
+        answered_since_s=12.0,
+        grace_s=10.0,
+        no_media_grace_s=20.0,
+        media_pkts=0,
+        nominated=False,
+        probes=0,
+        binding_success=0,
+    )
+    kw.update(over)
+    return _no_probe_abandon_due(**kw)
+
+
+def test_the_default_leaves_the_no_probe_fast_path_off():
+    # Shipped equal to the no-media grace, so the fast path never fires and
+    # _no_media_abandon_due ends the no-probe shape at its own grace: default
+    # behaviour is unchanged.  Lower it on a weak-link camera to opt in.
+    assert _NO_PROBE_GRACE_S == _NO_MEDIA_GRACE_S
+
+
+@pytest.mark.parametrize("grace", [20.0, 25.0])
+def test_a_grace_at_or_above_the_no_media_grace_never_fires(grace):
+    # Off unless set strictly below the no-media grace: this is what keeps the
+    # default a no-op.
+    assert _no_probe(grace_s=grace, no_media_grace_s=20.0, answered_since_s=999.0) is False
+
+
+@pytest.mark.parametrize("grace", [0.0, -1.0])
+def test_a_zero_or_negative_grace_disables_the_fast_path(grace):
+    assert _no_probe(grace_s=grace, answered_since_s=999.0) is False
+
+
+@pytest.mark.parametrize(
+    ("since", "expect"),
+    [
+        (None, False),  # no answer yet: a waking battery camera, never clipped
+        (9.9, False),  # inside the fast grace
+        (10.0, True),  # inclusive at the boundary
+        (12.0, True),
+    ],
+)
+def test_the_fast_path_times_the_no_probe_shape_from_the_answer(since, expect):
+    assert _no_probe(answered_since_s=since) is expect
+
+
+def test_any_media_ends_the_wait_instead_of_the_fast_abandon():
+    assert _no_probe(media_pkts=1) is False
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"nominated": True},  # a candidate nominated: not the no-probe shape
+        {"probes": 1},  # a STUN probe seen: ICE is progressing
+        {"binding_success": 1},  # a connectivity check answered
+    ],
+)
+def test_a_progressing_open_is_never_clipped_by_the_fast_path(over):
+    # Only the dead no-probe shape is abandoned early; a slow-but-progressing
+    # open sends probes and gets binding success, so it is never this shape.
+    assert _no_probe(**over) is False
 
 
 def _shape(**over):

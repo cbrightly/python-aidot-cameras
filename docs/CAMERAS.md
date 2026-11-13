@@ -139,7 +139,10 @@ opening a session until the device reports itself awake.
   whatever the shape - the camera never sent a STUN probe, nothing answered the
   candidate we nominated, or LIVING went out and neither an ack nor media
   followed. It is timed from the answer, never the open, so a camera still
-  waking is not clipped, and the stall WARNING names the shape. See
+  waking is not clipped, and the stall WARNING names the shape.
+  `AIDOT_SDES_NO_PROBE_GRACE_S` (off by default) is an opt-in faster abandon
+  for just the `no-probe` shape, for a weak-link camera that stalls that way
+  often; it acts only when set below the no-media grace. See
   [`ENVIRONMENT.md`](ENVIRONMENT.md) for the exact conditions.
 
 None of this wakes a camera that nobody is watching. Snapshots for a dashboard

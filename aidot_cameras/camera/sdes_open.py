@@ -1118,6 +1118,22 @@ _BATTERY_STALE_OFFER_GRACE_S = settings.read("AIDOT_BATTERY_STALE_OFFER_GRACE_S"
 _NO_MEDIA_GRACE_S = settings.read("AIDOT_SDES_NO_MEDIA_GRACE_S")
 
 
+# A faster abandon for ONE first-media shape: the no-probe stall (the camera
+# answered but its ICE agent sent no STUN probe, so nothing nominates and the
+# trigger never arms).  That shape never recovers - the trigger arms within
+# about a second of the answer or never - so cycling it to the retry sooner
+# only helps a weak-link camera (one that stalls this way often, measured on
+# an A001513) catch a good attempt inside its ~29 s wake window.
+#
+# Opt-in and off by default: it only acts when set BELOW the no-media grace; at
+# the default (equal to _NO_MEDIA_GRACE_S) the check never fires and
+# _no_media_abandon_due ends the no-probe shape at its own grace exactly as
+# before, so default behaviour is byte-identical.  A slow-but-progressing open
+# sends probes and gets binding success, so it is never this shape and is never
+# clipped by a low value.
+_NO_PROBE_GRACE_S = settings.read("AIDOT_SDES_NO_PROBE_GRACE_S")
+
+
 def _sd_session_mode(sd_playback) -> int:
     """The SESSION_MODE the data channel opens with: LIVING, or SD for playback.
 
@@ -1411,6 +1427,39 @@ def _no_media_abandon_due(*, answered_since_s, grace_s: float, media_pkts: int) 
     if answered_since_s < grace_s:
         return False
     return media_pkts == 0
+
+
+def _no_probe_abandon_due(
+    *,
+    answered_since_s,
+    grace_s: float,
+    no_media_grace_s: float,
+    media_pkts: int,
+    nominated: bool,
+    probes: int,
+    binding_success: int,
+) -> bool:
+    """Whether a no-probe stall should be abandoned ahead of the no-media grace.
+
+    A targeted, opt-in companion to :func:`_no_media_abandon_due`.  It abandons
+    only the no-probe shape (the camera answered but its ICE agent sent no STUN
+    probe, so nothing nominates and the trigger never arms), which never
+    recovers - the trigger arms within about a second of the answer or never -
+    so a weak-link camera that stalls this way often cycles to a fresh offer
+    sooner, inside its ~29 s wake window.
+
+    Off unless ``grace_s`` is set strictly BELOW ``no_media_grace_s``: equal or
+    above, this returns False and :func:`_no_media_abandon_due` ends the shape
+    at its own grace, so default behaviour is unchanged.  The shape test is the
+    no-probe branch of :func:`_no_media_shape` (nothing nominated, no probe, no
+    binding success); a slow-but-progressing open sends probes and gets binding
+    success, so it is never this shape and is never clipped.
+    """
+    if grace_s <= 0 or grace_s >= no_media_grace_s or answered_since_s is None:
+        return False
+    if answered_since_s < grace_s or media_pkts != 0:
+        return False
+    return not nominated and probes == 0 and binding_success == 0
 
 
 def _no_media_shape(
@@ -8366,6 +8415,41 @@ class _SdesOpenMixin:
                     and not ps.answer_fut.cancelled()
                 ):
                     _answered_at = time.monotonic()
+                if _no_probe_abandon_due(
+                    answered_since_s=(
+                        time.monotonic() - _answered_at
+                        if _answered_at is not None
+                        else None
+                    ),
+                    grace_s=_NO_PROBE_GRACE_S,
+                    no_media_grace_s=_NO_MEDIA_GRACE_S,
+                    media_pkts=int(getattr(_bridge_fn, "_br_media_pkts", 0))
+                    + int(getattr(_bridge_fn, "_br_tutk_media", 0)),
+                    nominated=bool(
+                        _early_nominated
+                        or ps._nominated_seen
+                        or _bridge_uc_info["sent"]
+                        or _bridge_uc_info["prflx"]
+                        or (
+                            ps._cam_ice_ufrag
+                            and ps._cam_ice_pwd
+                            and _bridge_uc_info["cands"]
+                        )
+                    ),
+                    probes=len(getattr(_bridge_fn, "_br_probe_verdicts", None) or {}),
+                    binding_success=int(
+                        getattr(_bridge_fn, "_br_binding_success_count", 0)
+                    ),
+                ):
+                    # The opt-in fast path for the no-probe shape (see
+                    # _no_probe_abandon_due); off unless the grace is set below
+                    # _NO_MEDIA_GRACE_S. That shape never recovers, so cycle to
+                    # the retry's fresh offer now, while a battery camera is
+                    # awake, instead of waiting out the full no-media grace.
+                    _stale_offer_abandoned = True
+                    _abandoned_by = "no-probe"
+                    ps._status(_NO_MEDIA_STATUS["no-probe"] % _NO_PROBE_GRACE_S)
+                    break
                 if _no_media_abandon_due(
                     answered_since_s=(
                         time.monotonic() - _answered_at

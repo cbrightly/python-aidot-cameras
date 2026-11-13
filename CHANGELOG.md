@@ -6,6 +6,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+- **`AIDOT_SDES_NO_PROBE_GRACE_S`**: an opt-in, off-by-default faster abandon
+  for the `no-probe` first-media stall (the camera answered but its ICE agent
+  sent no STUN probe, so nothing nominates and the trigger never arms). That
+  shape never recovers, so a weak-link battery camera that stalls this way
+  often can cycle to the retry's fresh offer sooner, inside its wake window.
+  It acts only when set strictly below `AIDOT_SDES_NO_MEDIA_GRACE_S`; at the
+  default (equal to it) the check never fires and behaviour is unchanged. A
+  slow-but-progressing open sends probes, so it is never this shape and is
+  never clipped.
+
 ## [1.3.3]
 
 ### Fixed

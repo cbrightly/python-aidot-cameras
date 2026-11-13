@@ -352,6 +352,19 @@ KNOBS: "dict[str, Knob]" = _registry(
     Knob("AIDOT_BATTERY_STALE_OFFER_GRACE_S", 15.0, "float"),
     Knob("AIDOT_SDES_NO_MEDIA_GRACE_S", 20.0, "float"),
     Knob(
+        "AIDOT_SDES_NO_PROBE_GRACE_S",
+        20.0,
+        "float",
+        note=(
+            "abandon a no-probe stall (the camera answered but its ICE agent"
+            " sent no STUN probe, so nothing nominates) this many seconds after"
+            " the answer, instead of the full no-media grace. Opt-in: defaults"
+            " to the no-media grace, so it only acts when set lower. A no-probe"
+            " stall never recovers, so a weak-link camera that stalls this way"
+            " often cycles to a fresh offer faster, inside its ~29 s wake window"
+        ),
+    ),
+    Knob(
         "AIDOT_SDES_ECHO_WAIT_S",
         None,
         "str",
