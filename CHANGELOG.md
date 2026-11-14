@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.4.0]
+
 ### Added
 - **`CameraDeviceClient.stream_health`** and
   **`add_stream_health_listener(callback)`**: a read-only account of what a
