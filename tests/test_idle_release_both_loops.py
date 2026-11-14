@@ -20,19 +20,27 @@ def test_the_stream_slot_is_released_even_if_the_serve_fails_to_start(
 ):
     """Thread.start() raises RuntimeError under thread exhaustion. Starting the
     serve's listener (the relay, before it) outside the try that releases lost
-    the permit for the life of the process and the cap silently shrank."""
+    the permit for the life of the process and the cap silently shrank. The
+    failure ends the loop like any other error in it: the camera is released
+    for the next view rather than left marked active behind a dead task."""
     slots = cc._get_stream_slots()
     cam = make_camera_device_client("A000088")
-    cam._keepalive_rtsp_url = "http://127.0.0.1:18559/cam.ts"
 
     def _no_threads(url):
         raise RuntimeError("can't start new thread")
 
+    async def _deregister():
+        return None
+
     cam._start_ts_serve = _no_threads
+    cam._deregister_go2rtc = _deregister
     before = slots._value
     for _ in range(before + 1):
-        with pytest.raises(RuntimeError):
-            asyncio.run(cam._dtls_serve_loop())
+        # Each view starts afresh: the release dropped the URL with the rest.
+        cam._keepalive_rtsp_url = "http://127.0.0.1:18559/cam.ts"
+        cam._streaming_active = True
+        asyncio.run(cam._dtls_serve_loop())
+        assert cam._streaming_active is False
     assert slots._value == before
 
 

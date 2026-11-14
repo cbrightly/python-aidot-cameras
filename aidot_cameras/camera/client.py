@@ -121,6 +121,7 @@ from .protocol import (  # noqa: F401 - re-exported for device_client / back-com
 from .. import settings
 from ..mqtt_config2 import broker_url as _mqtt_broker_url
 from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
+from . import stream_health as _sh
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1542,6 +1543,42 @@ class _DtlsServeLoopState:
     _grace_dtls: "Any" = dataclasses.field(init=False)  # prepare_session
 
 
+def _open_failure_reason(exc: BaseException) -> str:
+    """The stream-health end reason for an open that raised ``exc``."""
+    if isinstance(exc, AidotCameraBusy):
+        return _sh.END_BUSY
+    if isinstance(exc, AidotCameraNotReady):
+        return _sh.END_NOT_READY
+    if isinstance(exc, AidotCameraWrongCodec):
+        return _sh.END_WRONG_CODEC
+    if isinstance(exc, AidotCameraNoMedia):
+        return _sh.END_NO_MEDIA
+    return _sh.END_OPEN_FAILED
+
+
+def _backoff_wait_s(dev: Any, delay: float) -> float:
+    """The longest ``_backoff_or_offline_pause(delay)`` will wait: ``delay``,
+    or the offline probe interval when it will hold for the camera to come
+    back. Asked just before that wait, for stream health's ``retry_delay_s``,
+    which must not promise a reopen sooner than one will happen."""
+    return _OFFLINE_PROBE_S if _cloud_says_unavailable(dev) else delay
+
+
+def _dtls_end_reason(why: str, camera_closed: bool) -> str:
+    """The stream-health end reason for a DTLS session whose last serve cycle
+    ended for ``why`` (the serve cycle's own words)."""
+    if camera_closed:
+        return _sh.END_CAMERA_CLOSED
+    if why.startswith("no video"):
+        return _sh.END_NO_VIDEO
+    if why.startswith("publish ended"):
+        return _sh.END_SERVE_ENDED
+    # "connection <state>", and a session whose connection was gone before a
+    # serve cycle could start ("stopped before serving" on a loop still
+    # active). A stop or an idle release never reaches the session end.
+    return _sh.END_CONNECTION_LOST
+
+
 async def _dtls_serve_loop_open_attempt(
     self, ps: _DtlsServeLoopState
 ) -> _PhaseReturn | _LoopContinue | None:
@@ -1569,6 +1606,7 @@ async def _dtls_serve_loop_open_attempt(
         except asyncio.CancelledError:
             return _PhaseReturn(None)
     ps._last_open_at = ps.loop.time()
+    _sh._tracker_of(self).opening(ps._last_open_at)
     try:
         ps.session = await self.async_open_webrtc_stream(
             on_frame=lambda _f: None,
@@ -1632,6 +1670,11 @@ async def _dtls_serve_loop_open_attempt(
             else f"{_delay:.0f}s",
             _n,
             exc,
+        )
+        # A quick retry of the not-ready burst is an encoder still warming up:
+        # one connect, as the SDES loop reports the same answer.
+        _sh._tracker_of(self).ended(
+            _open_failure_reason(exc), _delay, still_connecting=_burst is not None
         )
         try:
             await self._chunked_wait(
@@ -1843,6 +1886,11 @@ async def _dtls_serve_loop_serve_cycle(
                     _dead = ps._pc_dead()
                     if _dead or progress[0] > _p0:
                         break
+                if not _dead and _video_has_started(_current_video_canary(self, ps.pc)):
+                    # Video, by the test the no-video verdict below uses. Not
+                    # progress: the mux writes audio too, and a session with
+                    # audio alone is not streaming.
+                    _sh._tracker_of(self).media_started(ps.loop.time())
                 # The serve is bound before the mux starts, so once a frame
                 # has been written (progress moved above) it is ready; the
                 # short margin below is kept from the ffmpeg serve, whose
@@ -1929,6 +1977,11 @@ async def _dtls_serve_loop_serve_cycle(
                     self, _current_video_canary(self, ps.pc)
                 ):
                     _first_video_at = _now
+                if _first_video_at is not None:
+                    # Video seen: streaming. (A no-op once said; the
+                    # serve-ready wait above usually says it.) Audio alone
+                    # moves progress and is not enough.
+                    _sh._tracker_of(self).media_started(_now)
                 if (
                     _video_presence_verdict(
                         _first_video_at, _connected_at, _now, _vid_grace
@@ -2024,6 +2077,8 @@ async def _dtls_serve_loop_serve_cycle(
                 and _note_video_started(self, _current_video_canary(self, ps.pc))
             ):
                 _first_video_at = ps.loop.time()
+                # So the end of this session is not counted as a failure.
+                _sh._tracker_of(self).media_started(_first_video_at)
             # When this cycle stopped serving, taken before the teardown
             # below (a mux join of up to 2 s, a backoff of up to 10 s, then
             # the session's stop), which would otherwise carry a
@@ -2184,7 +2239,9 @@ async def _dtls_serve_loop_session_end(
     if not self._streaming_active:
         return None
     _n = ps._session_pacer.attempt
+    _end_reason = _dtls_end_reason(str(ps._session_end_reason), _camera_close)
     if _wait is None:
+        _sh._tracker_of(self).ending(_end_reason)
         _LOGGER.warning(
             "camera %s: %d DTLS sessions in a row ended within %.0fs or "
             "delivered no video (the last: %.0fs, %s, %s) - stopping the "
@@ -2205,6 +2262,7 @@ async def _dtls_serve_loop_session_end(
         # which keys on the keepalive having ended.
         await self._go_dormant(release_url=False, why="session abandon")
         return _PhaseReturn(None)
+    _sh._tracker_of(self).ended(_end_reason, _wait)
     if not _wait:
         if _camera_close:
             _LOGGER.info(
@@ -2312,6 +2370,7 @@ async def _sdes_keepalive_open_attempt(
         )
         ps._peer_reuses = 0
     ps._peer_reuses += 1
+    _sh._tracker_of(self).opening(time.monotonic())
     try:
         ps.session = await self.async_open_webrtc_stream(
             rtsp_push_url=self._keepalive_rtsp_url,
@@ -2355,6 +2414,7 @@ async def _sdes_keepalive_open_attempt(
             busy,
             _BUSY_BACKOFF_S,
         )
+        _sh._tracker_of(self).ended(_sh.END_BUSY, _BUSY_BACKOFF_S)
         try:
             await asyncio.sleep(_BUSY_BACKOFF_S)
         except asyncio.CancelledError:
@@ -2367,6 +2427,11 @@ async def _sdes_keepalive_open_attempt(
         # camera that delivered is not one that delivered nothing: no
         # no-media accounting, no backoff, straight to the retry.
         _LOGGER.info("camera %s: re-opening after %s", self.device_id, _wrong)
+        # One second and straight back in: still the same connect.
+        # Nor a failure: the camera delivered.
+        _sh._tracker_of(self).ended(
+            _sh.END_WRONG_CODEC, 1.0, still_connecting=True, failure=False
+        )
         try:
             await asyncio.sleep(1.0)
         except asyncio.CancelledError:
@@ -2392,9 +2457,11 @@ async def _sdes_keepalive_open_attempt(
         # fast not-ready burst below is what keeps a merely-slow camera
         # responsive.
         ps._no_media_streak = _next_no_media_streak(ps._no_media_streak, False)
-        if _should_abandon_keepalive(
+        _abandon = _should_abandon_keepalive(
             ps._no_media_streak, is_battery=self.is_battery_camera
-        ):
+        )
+        if _abandon:
+            _sh._tracker_of(self).ending(_sh.END_NO_MEDIA)
             _LOGGER.warning(
                 "camera %s: %d consecutive keepalive attempts delivered "
                 "no media - stopping the background keepalive to stop "
@@ -2418,6 +2485,14 @@ async def _sdes_keepalive_open_attempt(
             _delay,
             f" [{ps._not_ready_burst}/{_PEERID_MAX_REUSE}]" if _fast_retry else "",
         )
+        # A fast retry is a battery camera still waking: one connect - unless
+        # the wait below turns into the offline hold, which is a real wait.
+        _wait = _backoff_wait_s(self, _delay)
+        _sh._tracker_of(self).ended(
+            _sh.END_NOT_READY if _fast_retry else _sh.END_NO_MEDIA,
+            _wait,
+            still_connecting=_fast_retry and not _cloud_says_unavailable(self),
+        )
         try:
             await self._backoff_or_offline_pause(_delay)
         except asyncio.CancelledError:
@@ -2431,12 +2506,23 @@ async def _sdes_keepalive_open_attempt(
             _delay,
             exc,
         )
+        _sh._tracker_of(self).ended(
+            _open_failure_reason(exc), _backoff_wait_s(self, _delay)
+        )
         try:
             await self._backoff_or_offline_pause(_delay)
         except asyncio.CancelledError:
             return _PhaseReturn(None)
         return _LoopContinue()
     return None
+
+
+def _sdes_media_seen(session: Any) -> bool:
+    """Has ``session`` received media? False for a session that cannot say."""
+    try:
+        return float(getattr(session, "last_media_monotonic", 0.0) or 0.0) > 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 async def _sdes_keepalive_prepare_session(self, ps: _SdesKeepaliveState) -> None:
@@ -2447,6 +2533,9 @@ async def _sdes_keepalive_prepare_session(self, ps: _SdesKeepaliveState) -> None
     ``continue``, ``break`` or ``return`` of the loop, else None.
     """
     self._stream_session = ps.session
+    if _sdes_media_seen(ps.session):
+        # The open returns on first media, so this is the connect time.
+        _sh._tracker_of(self).media_started(time.monotonic())
     # A remembered resolution is only deliverable once a session exists.
     self._apply_pending_resolution()
     # Don't block solely on wait_done(): the SDES ffmpeg reads RTP over a
@@ -2515,6 +2604,8 @@ async def _sdes_keepalive_watch_session(
                 except Exception:  # a report must never end a session
                     ps._health.skip(_h_now)
                     _LOGGER.debug("health line failed", exc_info=True)
+            if _sdes_media_seen(ps.session):
+                _sh._tracker_of(self).media_started(_h_now)  # a no-op once said
             if ps._done in _fin:
                 break  # ffmpeg exited on its own (consumer gone, error)
             if ps.session.is_stalled(
@@ -2662,6 +2753,14 @@ async def _sdes_keepalive_after_session(
     # Adaptive bookkeeping: a fast attempt that never delivered media
     # latches the loop onto the full relay path for its remaining opens.
     _healthy = ps.session.last_media_monotonic > 0.0
+    if not _healthy:
+        _end_reason = _sh.END_NO_MEDIA
+    elif ps._ice_dead:
+        _end_reason = _sh.END_ICE_LOST
+    elif ps._stalled:
+        _end_reason = _sh.END_MEDIA_STALLED
+    else:
+        _end_reason = _sh.END_SERVE_ENDED
     ps._no_media_streak = _next_no_media_streak(ps._no_media_streak, _healthy)
     if _healthy:
         # A session that delivered media is a real, cleanly-used session;
@@ -2678,6 +2777,7 @@ async def _sdes_keepalive_after_session(
             # Every open so far has cost the camera a wake and returned
             # nothing. Continuing spends charge to learn the same thing
             # again; a view will still open a session on demand.
+            _sh._tracker_of(self).ending(_end_reason)
             _LOGGER.warning(
                 "camera %s: %d consecutive keepalive sessions delivered no "
                 "media - stopping the background keepalive to stop waking "
@@ -2712,6 +2812,11 @@ async def _sdes_keepalive_after_session(
             )
         else:
             _delay = ps._pacer.session_end_delay(healthy=_healthy)
+        _sh._tracker_of(self).ended(
+            _sh.END_NOT_READY if _fast_retry else _end_reason,
+            _delay,
+            still_connecting=_fast_retry,
+        )
         try:
             await asyncio.sleep(_delay)
         except asyncio.CancelledError:
@@ -2900,6 +3005,8 @@ class CameraMixin(
         # Cold-start instrumentation: monotonic at the start of an open, so any
         # thread (signaling, bridge, serve) can log elapsed-ms phase markers.
         self._cold_open_t0: "Optional[float]" = None
+        # What the serve loops are doing, for stream_health.
+        self._stream_health_tracker = _sh._StreamHealthTracker()
         # Motion/event polling (cloud event list). NOTE: the camera does NOT push motion
         # to a passive MQTT subscriber - alarmType is only emitted during an active live
         # view (decompiled NewLiveFragment) - so real-time-ish motion for HA comes from
@@ -3138,6 +3245,39 @@ class CameraMixin(
         and the reboot guard ask this same question."""
         return _cloud_reports_offline(self)
 
+    @property
+    def stream_health(self) -> _sh.StreamHealth:
+        """What this camera's background stream is doing right now.
+
+        A ``StreamHealth`` snapshot (see ``aidot_cameras.camera.stream_health``):
+        ``state`` (one of ``STREAM_STATES``: idle, connecting, waking,
+        streaming, retrying, dormant, off), ``last_connect_s`` (seconds from
+        the start of the open that succeeded to first media),
+        ``last_end_reason`` (one of ``STREAM_END_REASONS``), ``retry_delay_s``
+        and ``failures``. It describes the stream ``start_keepalive`` (or
+        ``async_start_streaming``) runs; one-off opens such as a snapshot or an
+        SD playback are not in it. Reading it sends nothing.
+        """
+        return _sh._stream_health_of(
+            self,
+            powered_off=_camera_powered_off(self),
+            battery=bool(getattr(self, "is_battery_camera", False)),
+        )
+
+    def add_stream_health_listener(
+        self, callback: Callable[[], None]
+    ) -> Callable[[], None]:
+        """Call ``callback()`` whenever ``stream_health`` changes.
+
+        The callback takes no arguments, runs on the event loop and must not
+        block; read ``stream_health`` in it. An exception it raises is logged
+        at DEBUG and dropped. Returns a function that removes the listener.
+        A change of the power switch made through ``async_set_power`` is
+        announced; one that arrives in a status update is not, so a consumer
+        that polls status should re-read ``stream_health`` when it does.
+        """
+        return _sh._tracker_of(self).add_listener(callback)
+
     def _open_fail_logger(self):
         """Pick the log level for a stream-open failure in the serve/keepalive
         loops: WARNING for a genuine failure, but DEBUG when the cloud has
@@ -3167,6 +3307,7 @@ class CameraMixin(
         (observed live: two unpowered A000088s cycling 30 s open attempts
         pushed a healthy camera's cold open past two minutes).
         """
+        # _backoff_wait_s answers how long this waits; keep the two in step.
         if not _cloud_says_unavailable(self):
             await asyncio.sleep(delay)
             return
@@ -3740,10 +3881,17 @@ class CameraMixin(
         return mqtt_user, mqtt_pwd, client_id
 
     async def _persistent_request(
-        self, publish_items: list, sub_topics: list, timeout: float
+        self,
+        publish_items: list,
+        sub_topics: list,
+        timeout: float,
+        *,
+        until: "Optional[Callable[[str, str], bool]]" = None,
     ) -> tuple:
         """Publish ``publish_items`` and collect what arrives on ``sub_topics``
         for ``timeout`` seconds, on the account's one persistent connection.
+        ``until(topic, payload)`` ends the collection early at the first
+        message it accepts (``_PersistentMqtt.request``).
 
         ``(messages, status)``, as ``_PersistentMqtt.request``. With no
         connection to be had, ``([], {"error": _NO_PERSISTENT_MQTT})``: there
@@ -3761,8 +3909,17 @@ class CameraMixin(
             pm = None
         if pm is None:
             return [], {"error": _NO_PERSISTENT_MQTT}
+        if until is None:
+            return await pm.request(
+                publish_items=publish_items,
+                subscribe_topics=sub_topics,
+                timeout=timeout,
+            )
         return await pm.request(
-            publish_items=publish_items, subscribe_topics=sub_topics, timeout=timeout
+            publish_items=publish_items,
+            subscribe_topics=sub_topics,
+            timeout=timeout,
+            until=until,
         )
 
     async def _async_get_smarthome_auth(self) -> Optional[dict]:
@@ -5468,12 +5625,14 @@ class CameraMixin(
         if self._stream_task is not None and not self._stream_task.done():
             return
         self._streaming_active = True
+        _sh._tracker_of(self).starting()
         self._start_keepalive_renew()  # battery: renew keep-alive on this path too
         self._stream_task = asyncio.ensure_future(self._streaming_loop())
 
     async def async_stop_streaming(self) -> None:
         """Stop the persistent background WebRTC stream."""
         self._streaming_active = False
+        _sh._tracker_of(self).stopped()
         self._serve_ready.clear()
         g_task, self._go2rtc_task = self._go2rtc_task, None
         if g_task is not None and not g_task.done():
@@ -5894,6 +6053,10 @@ class CameraMixin(
         by hand.
         """
         self._streaming_active = False
+        if release_url:
+            _sh._tracker_of(self).released(_sh.END_IDLE_RELEASE)
+        else:
+            _sh._tracker_of(self).gave_up()
         self._cancel_keepalive_renew()
         if release_url:
             self._keepalive_rtsp_url = None
@@ -6049,6 +6212,7 @@ class CameraMixin(
         self._go2rtc_url = go2rtc_url
         self._go2rtc_manages_stream = bool(go2rtc_register)
         self._streaming_active = True
+        _sh._tracker_of(self).starting()
         # App parity: keep a battery camera awake for the whole view (mains cams
         # never sleep, so this is a no-op there). Single-instance; cancelled in
         # stop / idle-release.
@@ -6558,6 +6722,7 @@ class CameraMixin(
                 exc_info=exc,
             )
         self._streaming_active = False
+        _sh._tracker_of(self).released(_sh.END_ERROR)
         self._cancel_keepalive_renew()
         self._keepalive_rtsp_url = None
         self._serve_ready.clear()
@@ -6588,9 +6753,14 @@ class CameraMixin(
         The relay holds the public serve port connectable through every (re)open
         so an eager go2rtc pull waits instead of getting connection-refused while
         the SDES handshake runs (the same race fixed for the DTLS serve)."""
-        self._serve_relay = self._maybe_start_serve_relay(self._keepalive_rtsp_url)
+        self._serve_relay = None
         try:
             try:
+                # Inside the try: a relay that cannot start (the host is out
+                # of threads) releases the camera like any other loop error.
+                self._serve_relay = self._maybe_start_serve_relay(
+                    self._keepalive_rtsp_url
+                )
                 await self._sdes_keepalive_loop_inner()
             except asyncio.CancelledError:
                 raise
@@ -6708,6 +6878,7 @@ class CameraMixin(
                 pil_img.save(buf, "JPEG")
                 self.latest_jpeg = buf.getvalue()
                 self._last_frame_time = asyncio.get_running_loop().time()
+                _sh._tracker_of(self).media_started(self._last_frame_time)
             except Exception as enc_exc:
                 _LOGGER.debug(
                     "Streaming encode failed for %s: %s", self.device_id, enc_exc
@@ -6718,6 +6889,7 @@ class CameraMixin(
             # previous session must not be held against this one.
             self._last_frame_time = 0.0
             _open_time = asyncio.get_running_loop().time()
+            _sh._tracker_of(self).opening(_open_time)
             try:
                 session = await self.async_open_webrtc_stream(on_frame=_on_frame)
             except asyncio.CancelledError:
@@ -6732,6 +6904,7 @@ class CameraMixin(
                     busy,
                     _BUSY_BACKOFF_S,
                 )
+                _sh._tracker_of(self).ended(_sh.END_BUSY, _BUSY_BACKOFF_S)
                 try:
                     await asyncio.sleep(_BUSY_BACKOFF_S)
                 except asyncio.CancelledError:
@@ -6744,6 +6917,9 @@ class CameraMixin(
                     self.device_id,
                     _delay,
                     exc,
+                )
+                _sh._tracker_of(self).ended(
+                    _open_failure_reason(exc), _backoff_wait_s(self, _delay)
                 )
                 try:
                     await self._backoff_or_offline_pause(_delay)
@@ -6786,8 +6962,13 @@ class CameraMixin(
                 # after good streaming); escalate with jitter if it never did
                 # (the camera-degradation case).
                 _produced = self._last_frame_time > _open_time
+                _end_delay = _pacer.session_end_delay(healthy=_produced)
+                _sh._tracker_of(self).ended(
+                    _sh.END_MEDIA_STALLED if _produced else _sh.END_NO_MEDIA,
+                    _end_delay,
+                )
                 try:
-                    await asyncio.sleep(_pacer.session_end_delay(healthy=_produced))
+                    await asyncio.sleep(_end_delay)
                 except asyncio.CancelledError:
                     return
 
@@ -7410,9 +7591,13 @@ class CameraMixin(
             # threads, and escaping here would skip slots.release() and burn a
             # permit for the life of the process - the cap would silently shrink
             # until nothing could stream at all.
-            if _dtls_serve_mode(self._keepalive_rtsp_url) == "pull":
-                self._ts_serve = self._start_ts_serve(self._keepalive_rtsp_url)
+            #
+            # And inside the inner try too: a serve that cannot start ends the
+            # loop like any other error in it, so the camera is released and
+            # stream health reads idle ("error") instead of connecting forever.
             try:
+                if _dtls_serve_mode(self._keepalive_rtsp_url) == "pull":
+                    self._ts_serve = self._start_ts_serve(self._keepalive_rtsp_url)
                 await self._dtls_serve_loop_inner()
             except asyncio.CancelledError:
                 raise

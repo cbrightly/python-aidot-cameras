@@ -434,7 +434,7 @@ class _CameraSdMixin:
 # --------------------------------------------------------------------------- #
 
 #: The thumbnail request names recordings by their start as epoch
-#: milliseconds (the app's Long per recording); the reply carries the request
+#: seconds (the app's Long per recording); the reply carries the request
 #: channel, the time back, and the picture.
 _THUMB_HEADER = struct.Struct("<Iq")
 
@@ -485,14 +485,48 @@ def sd_thumbnail_request(records: "list", channel: int) -> bytes:
     return out
 
 
+#: JPEG start and end markers, and how far from the end of a thumbnail the end
+#: marker may sit and still be taken as the picture's own. The camera appends
+#: 4 bytes after the picture (measured); the window is a little wider than
+#: that and far too small to reach an end marker inside the picture.
+_JPEG_SOI = b"\xff\xd8"
+_JPEG_EOI = b"\xff\xd9"
+_JPEG_TAIL_WINDOW = 16
+
+
+def _trim_jpeg_tail(picture: bytes) -> bytes:
+    """``picture`` ending exactly at its JPEG end marker.
+
+    The cut is at the FIRST end marker that lies within ``_JPEG_TAIL_WINDOW``
+    bytes of the end. Only the tail is searched: a preview embedded in the
+    picture (EXIF/JFIF) carries its own end marker earlier in the data, and
+    that one is not the picture's. Within the tail the first one is taken,
+    not the last, because the bytes the camera appends are arbitrary and can
+    themselves read ff d9; picture data cannot (an ff inside it is stuffed).
+    Anything else comes back untouched: bytes that are not a JPEG, a picture
+    that already ends at its end marker, or one with no end marker within the
+    window.
+    """
+    if not picture.startswith(_JPEG_SOI):
+        return picture
+    # The earliest place an end marker can start and still leave no more than
+    # the window after it; never inside the start marker.
+    start = max(len(_JPEG_SOI), len(picture) - _JPEG_TAIL_WINDOW - len(_JPEG_EOI))
+    end = picture.find(_JPEG_EOI, start)
+    if end < 0:
+        return picture
+    return picture[: end + len(_JPEG_EOI)]
+
+
 def parse_sd_thumbnail(payload: bytes) -> "Optional[tuple[int, int, bytes]]":
     """A 0x4ba reply as (request channel, start epoch seconds, picture bytes), or
     None when it is too short to be one. Read as the app reads it: 4 bytes,
-    8 bytes, then everything else is the picture."""
+    8 bytes, then everything else is the picture - less the few bytes the
+    camera appends after the JPEG end marker (see ``_trim_jpeg_tail``)."""
     if len(payload) < _THUMB_HEADER.size:
         return None
     channel, when = _THUMB_HEADER.unpack_from(payload, 0)
-    return channel, when, bytes(payload[_THUMB_HEADER.size :])
+    return channel, when, _trim_jpeg_tail(bytes(payload[_THUMB_HEADER.size :]))
 
 
 def sd_delete_request(

@@ -59,6 +59,59 @@ def test_request_sync_returns_error_when_publish_raises(monkeypatch):
     assert pm._collectors == []
 
 
+class _QuietClient:
+    def publish(self, *a):
+        return None
+
+
+def _answering(pm, items):
+    """Deliver ``items`` to the request's collector once it is listening."""
+    import threading
+    import time
+
+    def _feed():
+        deadline = time.monotonic() + 2.0
+        while not pm._collectors and time.monotonic() < deadline:
+            time.sleep(0.005)
+        for item in items:
+            for q in list(pm._collectors):
+                q.put(item)
+
+    threading.Thread(target=_feed, daemon=True).start()
+
+
+def test_request_sync_returns_at_the_message_its_caller_was_waiting_for(monkeypatch):
+    import time
+
+    pm = _PersistentMqtt("wss://h:8443/mqtt", "u", "p", "cid")
+    monkeypatch.setattr(pm, "_ensure_started_sync", lambda timeout=15.0: True)
+    pm._client = _QuietClient()
+    _answering(pm, [("t", "other"), ("t", "mine"), ("t", "late")])
+    t0 = time.monotonic()
+    messages, st = pm._request_sync(
+        [("t", "pp")], [], None, 5.0, until=lambda topic, payload: payload == "mine"
+    )
+    assert time.monotonic() - t0 < 3.0, "the timeout was not waited out"
+    assert messages == [("t", "other"), ("t", "mine")]
+    assert st == {"error": None}
+    assert pm._collectors == []
+
+
+def test_request_sync_without_a_predicate_still_collects_for_the_whole_timeout(
+    monkeypatch,
+):
+    import time
+
+    pm = _PersistentMqtt("wss://h:8443/mqtt", "u", "p", "cid")
+    monkeypatch.setattr(pm, "_ensure_started_sync", lambda timeout=15.0: True)
+    pm._client = _QuietClient()
+    _answering(pm, [("t", "one"), ("t", "two")])
+    t0 = time.monotonic()
+    messages, _st = pm._request_sync([("t", "pp")], [], None, 0.3)
+    assert time.monotonic() - t0 >= 0.3
+    assert messages == [("t", "one"), ("t", "two")]
+
+
 # --- finding 4: get-or-create is single-flight under concurrency ------------- #
 
 

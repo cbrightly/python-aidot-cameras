@@ -39,7 +39,8 @@ Messages the app's IPC service sends or handles, by method name.
 | `devUnbindNotif` | cloud -> app | device removed from the account | yes since library 1.1.1 (`async_watch_unbind`) and integration 2.40.0 (re-syncs the device list on the notice) |
 | `devDiscoveryReq` | app -> LAN | LAN discovery broadcast (lights and cameras) | yes |
 | `loginReq` / `loginResp` | app -> device (LAN) | LAN login (lights) | yes (upstream python-aidot) |
-| `getVerListReq`, `getDevInfoReq` | app -> cloud/camera | firmware version list; device info for an abnormal version | no (see 5) |
+| `getVerListReq` / `getVerListResp` | app -> cloud `ota` service | firmware version list: is a newer firmware offered (see 5) | yes, read-only (`async_get_firmware_info`) |
+| `getDevInfoReq` | app -> cloud/camera | device info; the app reads `payload.version` and posts it to its `/api/abnormalVersion/check` HTTP check | no |
 | `getPlaybackServerInfoReq`, `getVideoListResp`, `playVideoResp`, `hasVideoResp` | app <-> cloud | cloud (paid plan) recordings over the Netty stream service | partial: cloud recordings are read over HTTP by the integration (`recordings.py`); the app's streaming server path is not used |
 | `commonNotify`, `bleNotify` | BLE | Bluetooth provisioning of lights | n/a |
 
@@ -110,11 +111,31 @@ stream.
 
 ## 5. Not implemented, by choice or not yet
 
-- **Firmware update (OTA):** `getVerListReq`, `devActionReq ota`,
-  `updateOtaStatusNotify`. Not implemented. Exposing a firmware update in Home
-  Assistant is possible (an `update` entity) but a failed update bricks a
-  camera the user cannot reach; left to the app on purpose. The firmware
-  version is shown.
+- **Firmware update (OTA):** `devActionReq ota` and `updateOtaStatusNotify`
+  are not implemented, on purpose: a failed update bricks a camera the user
+  cannot reach, so installing is left to the app. The version query alone is
+  implemented, read-only (`async_get_firmware_info`), from the app's
+  `NewLivePresenter` and `NewLiveFragment`:
+  - Request, published to `iot/v1/s/{userId}/ota/getVerListReq`:
+    `{"method": "getVerListReq", "devId": <id>, "service": "ota", "payload":
+    {"devId": <id>, "productId": <product id>, "homeId": <house id>,
+    "devType": "IPC"}}`, plus the `srcAddr` (`0.<userId>`), `seq` and `tst`
+    the app's MQTT layer stamps on every request (it also adds a `tid`, which
+    the library sends on no request).
+  - Reply (measured 2026-11-14), on `iot/v1/c/{userId}/ota/getVerListResp`:
+    `method` `getVerListResp`, the request's `seq`, `ack.code` `"200"`, and
+    `payload.verList`, one entry per camera asked: `devId`, `newVersion`,
+    `oldVersion`, `newVersionShow`, `oldVersionShow`, `forceOta`, `fwType`,
+    `msg`, `percent`, `stage`. The app reads `newVersion` and `oldVersion`
+    and offers an update when the two strings differ; so does the library.
+    `oldVersion` has the format of the device list's firmware version.
+  - A camera that is up to date gets one entry with equal versions, not an
+    empty list.
+  - The cloud answers by itself: a battery camera that was offline with no
+    session open was answered like a mains camera. The request is sent
+    whatever the camera's state and wakes nothing.
+  - Not yet seen: a reply while an update is on offer (whether `msg` then
+    carries notes), and a shared camera.
 - **Event push (`devEventNotif` / `eventNotify`):** the integration polls the
   cloud event list; the app gets a push over its own socket service. On the
   MQTT topics the cloud sends a `devEventNotif` for a camera every 5 s while

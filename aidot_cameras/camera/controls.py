@@ -6,11 +6,13 @@ the inherited async_set_device_attribute / async_trigger_device_action, so this
 mixin must be combined into CameraMixin (it is not usable standalone).
 """
 
+import json
 import logging
+import random
 import struct
 import time
 
-from typing import Optional
+from typing import Any, Optional
 
 from .constants import (
     _PTZ_DIR_CODES,
@@ -19,7 +21,12 @@ from .constants import (
     IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ,
     IOTYPE_USER_IPCAM_SETSTREAMCTRL_RESP,
 )
-from .models import _cloud_reports_offline
+from .models import (
+    FirmwareInfo,
+    _cloud_reports_offline,
+    parse_firmware_version_list,
+)
+from .stream_health import _tracker_of
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -205,6 +212,8 @@ class _CameraControlsMixin:
             # A device-list poll that was in flight can still carry the old
             # value; _camera_powered_off prefers this write for a while.
             self._power_write = (time.monotonic(), on)
+            # stream_health reads the switch: tell its listeners.
+            _tracker_of(self).notify()
         return ok
 
     async def async_set_microphone(self, enabled: bool) -> bool:
@@ -459,6 +468,101 @@ class _CameraControlsMixin:
         return await self.async_trigger_device_action(
             "RebootFunc", [], expect_ack=False
         )
+
+    async def async_get_firmware_info(
+        self, *, timeout: float = 8.0
+    ) -> "Optional[FirmwareInfo]":
+        """Ask whether a newer firmware exists. Read-only; installs nothing.
+
+        The request the vendor app sends on entering a camera's live page
+        (``NewLivePresenter``): ``getVerListReq`` on the ``ota`` service,
+
+          Topic:   iot/v1/s/{userId}/ota/getVerListReq
+          Payload: {"method": "getVerListReq", "devId": ..., "service": "ota",
+                    "payload": {"devId", "productId", "homeId", "devType": "IPC"}}
+
+        with ``srcAddr``, ``seq`` and ``tst`` stamped on by the app's MQTT
+        layer. The reply is matched on ``seq``, as the app matches it, and read
+        as the app reads it: ``payload.verList[0]`` with ``newVersion`` and
+        ``oldVersion``.
+
+        Returns a :class:`FirmwareInfo`, or ``None`` when nothing usable came
+        back. ``None`` means UNKNOWN, never "up to date". It returns as soon as
+        the reply arrives; ``timeout`` is how long to wait for one.
+
+        The cloud's ``ota`` service answers by itself, on
+        ``iot/v1/c/{userId}/ota/getVerListResp``; the camera is not involved.
+        Measured 2026-11-14: a battery camera that was offline with no session
+        open was answered like any other, so the request is sent whatever the
+        camera's state. A camera that is up to date gets one entry whose two
+        versions are equal.
+        """
+        user_id = self.user_id
+        device_id = self.device_id
+        raw = getattr(self, "_raw_device", None)
+        raw = raw if isinstance(raw, dict) else {}
+        seq = f"ap{random.randint(1000000, 9999999)}"
+        request = json.dumps(
+            {
+                "method": "getVerListReq",
+                "devId": device_id,
+                "service": "ota",
+                "srcAddr": f"0.{user_id}",
+                "seq": seq,
+                "tst": int(time.time() * 1000),
+                "payload": {
+                    "devId": device_id,
+                    "productId": str(raw.get("productId") or ""),
+                    # The device record names its house ``houseId`` (the
+                    # upstream client's DeviceInformation). The cloud answers
+                    # without it, so a record that lacks it sends "".
+                    "homeId": str(raw.get("houseId") or ""),
+                    "devType": "IPC",
+                },
+            }
+        )
+
+        # The seq IS a filter here. The connection carries the whole account,
+        # the reply is not known to name its camera anywhere else, and the app
+        # itself finds this reply by seq alone.
+        def _our_reply(body: Any) -> "Optional[dict]":
+            try:
+                msg = json.loads(body)
+            except Exception:
+                return None
+            if not isinstance(msg, dict) or msg.get("seq") != seq:
+                return None
+            if msg.get("method") == "getVerListReq":
+                return None  # our own request, should the broker hand it back
+            return msg
+
+        messages, status = await self._persistent_request(
+            [(f"iot/v1/s/{user_id}/ota/getVerListReq", request)],
+            [f"iot/v1/c/{user_id}/#", f"iot/v1/cb/{user_id}/#"],
+            timeout,
+            # One reply per request: stop collecting when it is in.
+            until=lambda _topic, body: _our_reply(body) is not None,
+        )
+        if status.get("error"):
+            _LOGGER.debug(
+                "getVerListReq: MQTT failed for %s (%s)", device_id, status.get("error")
+            )
+        answered = False
+        for _topic, body in messages:
+            msg = _our_reply(body)
+            if msg is None:
+                continue
+            answered = True
+            info = parse_firmware_version_list(msg)
+            if info is not None:
+                return info
+        _LOGGER.debug(
+            "getVerListReq: %s for %s (%d messages seen)",
+            "a reply without a usable version list" if answered else "no reply",
+            device_id,
+            len(messages),
+        )
+        return None
 
     async def async_set_night_vision(self, mode: str) -> bool:
         """mode: 'auto' (0), 'on' (1), 'off' (2)"""

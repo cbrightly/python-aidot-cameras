@@ -6,6 +6,57 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+- **`CameraDeviceClient.stream_health`** and
+  **`add_stream_health_listener(callback)`**: a read-only account of what a
+  camera's background stream is doing, so a consumer can tell a camera that is
+  connecting from one that is retrying, dormant or switched off without
+  reading private attributes. `stream_health` returns a `StreamHealth`
+  (exported from the package root) with `state` (`idle`, `connecting`,
+  `waking`, `streaming`, `retrying`, `dormant` or `off`), `last_connect_s`
+  (seconds from the start of the open that succeeded to first media),
+  `last_end_reason` (why the last session or open attempt ended, one of
+  `aidot_cameras.camera.stream_health.STREAM_END_REASONS`), `retry_delay_s`
+  and `failures`. The listener is called on the event loop on every change,
+  and only on a change. `waking` is `connecting` on a battery camera; `off`
+  is the camera's own power switch. On a DTLS camera `streaming` means video
+  a viewer can use has arrived: a session with audio alone stays `connecting`
+  and ends as `no_video`. `retry_delay_s` is the longest the loop will wait
+  before it reopens, so for a camera the cloud reports offline it is the
+  offline hold (`AIDOT_OFFLINE_PROBE_S`) where the loop takes one, not the
+  backoff. Quick retries that belong to one connect (a camera not ready yet,
+  a wrong-codec reopen) read as `connecting` on every camera, and a
+  wrong-codec reopen is not counted in `failures`. After
+  `async_stop_streaming` the state stays `idle` until the stream is started
+  again. The serve loops' pacing is unchanged. Documented in
+  `docs/API-STABILITY.md`.
+- **`async_get_firmware_info()`**: the app's read-only firmware version query
+  (`getVerListReq` on the `ota` service). Returns a `FirmwareInfo` with the
+  installed and the offered version, or `None` when the cloud gave no usable
+  answer. Nothing is installed: the update itself stays in the AiDot app. The
+  cloud answers by itself, so the query works for a sleeping or offline
+  camera too and wakes nothing. It returns as soon as the reply arrives;
+  `timeout` (8 s) only bounds the wait for one. The request is the app's; the
+  reply was measured live on mains and battery cameras.
+
+### Fixed
+- **Card thumbnails end at the JPEG end marker.** Each 0x4ba reply is a valid
+  JPEG followed by 4 more bytes (measured on a camera). Decoders stop at the
+  end marker, so pictures rendered, but a strict consumer could object.
+  `parse_sd_thumbnail`, and so `async_get_sd_thumbnails`, now drop what
+  follows the end marker when it sits within 16 bytes of the end. Only that
+  tail is searched, because an embedded preview carries an end marker of its
+  own earlier in the data; within the tail the first marker is the cut, so
+  appended bytes that themselves read ff d9 go too. A payload that is not a
+  JPEG, or has no end marker that close to the end, is returned as it was.
+- **A serve that cannot start releases the camera.** When the DTLS serve's
+  listener or the SDES serve relay failed to start with anything but a bind
+  error (a host out of threads), the loop's task died with the stream still
+  marked active: the stream URL kept answering, `start_keepalive` did
+  nothing, and a battery camera's keep-alive kept renewing. It now ends like
+  any other error inside the loop: logged, the camera released until the next
+  view, `stream_health` `idle` with `last_end_reason` `error`.
+
 ## [1.3.4]
 
 ### Added

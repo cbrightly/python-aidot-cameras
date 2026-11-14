@@ -20,6 +20,7 @@ from .settings import StreamSettings
 # not drag in av or aiortc, so a plain (non-[webrtc]) install still imports.
 from .camera.models import CameraDeviceInformation, CameraStatusData
 from .camera.sdes import SdesSession
+from .camera.stream_health import StreamHealth
 from .camera.webrtc import WebRTCSession
 from .discover import CameraDiscover, Discover
 from .exceptions import (
@@ -200,6 +201,7 @@ __all__ = [
     "InvalidURL",
     "RtspPublishError",
     "SdesSession",
+    "StreamHealth",
     "StreamSettings",
     "WebRTCSession",
     "configure_stream_limits",

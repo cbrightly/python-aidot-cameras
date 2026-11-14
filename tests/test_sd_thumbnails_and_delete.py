@@ -20,7 +20,9 @@ from aidot_cameras.camera.constants import (
 )
 from aidot_cameras.camera.sd_events import SdEvent
 from aidot_cameras.camera.sd_listing import (
+    _JPEG_TAIL_WINDOW,
     _record_epoch_s,
+    _trim_jpeg_tail,
     parse_sd_thumbnail,
     sd_delete_request,
     sd_thumbnail_request,
@@ -46,6 +48,79 @@ def test_a_thumbnail_reply_is_channel_time_and_picture():
     payload = struct.pack("<Iq", 7, _record_epoch_s(REC)) + b"\xff\xd8JPEG"
     assert parse_sd_thumbnail(payload) == (7, _record_epoch_s(REC), b"\xff\xd8JPEG")
     assert parse_sd_thumbnail(b"\x00" * 11) is None
+
+
+# A small but well-formed picture: start marker, some data, end marker.
+JPEG = b"\xff\xd8" + b"\x11\x22\x33" * 20 + b"\xff\xd9"
+
+
+def _reply(picture: bytes) -> bytes:
+    return struct.pack("<Iq", 7, _record_epoch_s(REC)) + picture
+
+
+def test_a_clean_jpeg_is_returned_unchanged():
+    assert _trim_jpeg_tail(JPEG) == JPEG
+    assert parse_sd_thumbnail(_reply(JPEG)) == (7, _record_epoch_s(REC), JPEG)
+
+
+def test_bytes_after_the_end_marker_are_removed():
+    # What the camera sends: the picture, then 4 more bytes.
+    assert _trim_jpeg_tail(JPEG + b"\x00\x01\x02\x03") == JPEG
+    assert parse_sd_thumbnail(_reply(JPEG + b"\x00\x01\x02\x03"))[2] == JPEG
+    # Up to the whole window is removed.
+    assert _trim_jpeg_tail(JPEG + b"\x00" * _JPEG_TAIL_WINDOW) == JPEG
+
+
+def test_trailing_bytes_holding_ff_are_removed():
+    assert _trim_jpeg_tail(JPEG + b"\xff\xff\x00\xff") == JPEG
+    assert _trim_jpeg_tail(JPEG + b"\xff") == JPEG
+    assert _trim_jpeg_tail(JPEG + b"\xd9\xff\x00\xd9") == JPEG
+
+
+def test_trailing_bytes_that_read_as_an_end_marker_are_removed_too():
+    # The cut is at the picture's own marker, the first one in the tail, not
+    # at one the appended bytes happen to spell.
+    assert _trim_jpeg_tail(JPEG + b"\xff\xd9\x00\x01") == JPEG
+    assert _trim_jpeg_tail(JPEG + b"\x00\x01\xff\xd9") == JPEG
+    assert _trim_jpeg_tail(JPEG + b"\xff\xd9\xff\xd9") == JPEG
+    assert (
+        _trim_jpeg_tail(JPEG + b"\x00" * (_JPEG_TAIL_WINDOW - 2) + b"\xff\xd9") == JPEG
+    )
+    assert parse_sd_thumbnail(_reply(JPEG + b"\x07\xff\xd9\x00"))[2] == JPEG
+
+
+def test_an_embedded_end_marker_is_not_the_cut_point():
+    # An embedded preview ends with its own marker long before the picture's.
+    inner = b"\xff\xd8" + b"\x44" * 30 + b"\xff\xd9"
+    picture = b"\xff\xd8\xff\xe1" + inner + b"\x55" * 60 + b"\xff\xd9"
+    assert _trim_jpeg_tail(picture) == picture
+    assert _trim_jpeg_tail(picture + b"\x00\x01\x02\x03") == picture
+
+
+def test_an_end_marker_far_from_the_end_leaves_the_bytes_alone():
+    # Only an embedded marker, further back than the window: not cut there.
+    truncated = b"\xff\xd8" + b"\x44" * 10 + b"\xff\xd9" + b"\x55" * 60
+    assert _trim_jpeg_tail(truncated) == truncated
+    beyond = JPEG + b"\x00" * (_JPEG_TAIL_WINDOW + 1)
+    assert _trim_jpeg_tail(beyond) == beyond
+
+
+def test_a_picture_with_no_end_marker_is_returned_unchanged():
+    assert _trim_jpeg_tail(b"\xff\xd8" + b"\x11" * 40) == b"\xff\xd8" + b"\x11" * 40
+    assert _trim_jpeg_tail(b"\xff\xd8") == b"\xff\xd8"
+    assert _trim_jpeg_tail(b"\xff\xd8\xd9") == b"\xff\xd8\xd9"
+    # The shortest picture there is, and nothing shorter comes back.
+    assert _trim_jpeg_tail(b"\xff\xd8\xff\xd9") == b"\xff\xd8\xff\xd9"
+    assert _trim_jpeg_tail(b"\xff\xd8\xff\xd9\x00\x00") == b"\xff\xd8\xff\xd9"
+
+
+def test_an_empty_or_non_jpeg_picture_is_returned_unchanged():
+    assert _trim_jpeg_tail(b"") == b""
+    assert parse_sd_thumbnail(_reply(b"")) == (7, _record_epoch_s(REC), b"")
+    assert _trim_jpeg_tail(b"\xff") == b"\xff"
+    other = b"\x89PNG" + b"\x00" * 8 + b"\xff\xd9\x00\x00"
+    assert _trim_jpeg_tail(other) == other
+    assert _trim_jpeg_tail(b"\xff\xd9\x00\x00") == b"\xff\xd9\x00\x00"
 
 
 def test_the_delete_request_layout():
@@ -98,6 +173,13 @@ def test_thumbnails_come_back_keyed_by_record(make_camera_device_client):
     out = asyncio.run(cam.async_get_sd_thumbnails([REC, REC2], session=sess))
     assert out == {REC: b"\xff\xd8one"}  # REC2 had no picture
     assert sess.sent[0][0] == IOTYPE_USER_IPCAM_SD_THUMBNAIL_REQ
+
+
+def test_thumbnails_come_back_ending_at_the_end_marker(make_camera_device_client):
+    cam = make_camera_device_client("A000088")
+    sess = _Session(thumbs={_record_epoch_s(REC): JPEG + b"\x00\x01\x02\x03"})
+    out = asyncio.run(cam.async_get_sd_thumbnails([REC], session=sess))
+    assert out == {REC: JPEG}
 
 
 def test_thumbnails_need_a_live_session(make_camera_device_client):

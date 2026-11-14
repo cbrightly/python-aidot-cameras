@@ -2113,7 +2113,9 @@ class _PersistentMqtt:
                 except Exception:
                     _LOGGER.debug("persistent mqtt: subscribe %s failed", t)
 
-    def _request_sync(self, publish_items, subscribe_topics, match, timeout):
+    def _request_sync(
+        self, publish_items, subscribe_topics, match, timeout, until=None
+    ):
         import queue as _queue
         import time as _time
 
@@ -2144,6 +2146,10 @@ class _PersistentMqtt:
                     continue
                 if match is None or match(item[0], item[1]):
                     collected.append(item)
+                    # A caller that knows its answer when it sees it need not
+                    # sit out the rest of the timeout.
+                    if until is not None and until(item[0], item[1]):
+                        break
         finally:
             with self._lock:
                 try:
@@ -2153,18 +2159,33 @@ class _PersistentMqtt:
         return collected, {"error": None}
 
     async def request(
-        self, publish_items, subscribe_topics=None, match=None, timeout=5.0
+        self,
+        publish_items,
+        subscribe_topics=None,
+        match=None,
+        timeout=5.0,
+        until=None,
     ):
         """Publish ``publish_items`` and collect matching messages for ``timeout``
         on the shared persistent connection (one connect for the account, reused).
-        Returns (messages, status)."""
+        Returns (messages, status).
+
+        ``until(topic, payload)``, when given, is asked about each collected
+        message and ends the collection early when it returns true; that
+        message is the last one returned. It runs on the collecting thread and
+        must not raise. Without it the whole ``timeout`` is waited."""
         import functools
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
             functools.partial(
-                self._request_sync, publish_items, subscribe_topics, match, timeout
+                self._request_sync,
+                publish_items,
+                subscribe_topics,
+                match,
+                timeout,
+                until,
             ),
         )
 

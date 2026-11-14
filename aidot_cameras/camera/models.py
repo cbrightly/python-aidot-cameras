@@ -243,6 +243,58 @@ class CameraStatusData(DeviceStatusData):
         )
 
 
+@dataclass(frozen=True)
+class FirmwareInfo:
+    """What the cloud's firmware version list says about one camera.
+
+    ``installed_version`` and ``latest_version`` are the list entry's
+    ``oldVersion`` and ``newVersion``, as sent. The vendor app offers an update
+    exactly when the two differ. ``release_notes`` is None: the entry is not
+    known to carry any text.
+    """
+
+    installed_version: Optional[str]
+    latest_version: Optional[str]
+    release_notes: Optional[str] = None
+
+    @property
+    def update_available(self) -> bool:
+        """The app's own rule: both known, and not the same string."""
+        return (
+            self.installed_version is not None
+            and self.latest_version is not None
+            and self.installed_version != self.latest_version
+        )
+
+
+def parse_firmware_version_list(message: Any) -> Optional[FirmwareInfo]:
+    """A ``getVerListResp`` message as a :class:`FirmwareInfo`, else None.
+
+    The app reads ``payload.verList[0]`` and takes ``newVersion`` and
+    ``oldVersion`` from it, nothing else. The reply is remote data, so every
+    level is checked; an empty list, a missing key or a non-string version
+    yields None, which callers read as "unknown".
+    """
+    if not isinstance(message, dict):
+        return None
+    payload = message.get("payload")
+    ver_list = payload.get("verList") if isinstance(payload, dict) else None
+    if not isinstance(ver_list, list) or not ver_list:
+        return None
+    entry = ver_list[0]
+    if not isinstance(entry, dict):
+        return None
+
+    def _version(key: str) -> Optional[str]:
+        value = entry.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    latest = _version("newVersion")
+    if latest is None:
+        return None
+    return FirmwareInfo(installed_version=_version("oldVersion"), latest_version=latest)
+
+
 def _firmware_version(device: dict) -> Optional[str]:
     """``firmwareVersion`` from the device record, at the top level or under
     ``deviceInfo``; None when neither carries a non-empty string."""

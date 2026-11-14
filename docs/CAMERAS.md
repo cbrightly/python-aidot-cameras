@@ -579,6 +579,43 @@ await device_client.async_start_motion_polling(callback, interval=30.0)
 await device_client.async_stop_motion_polling()
 ```
 
+## Stream health
+
+What the background stream (`start_keepalive`) is doing, for a consumer that
+has to explain a blank picture:
+
+```python
+health = device_client.stream_health  # sends nothing
+health.state            # idle, connecting, waking, streaming, retrying, dormant, off
+health.last_connect_s   # seconds from the open that succeeded to first media
+health.last_end_reason  # why the last session or open attempt ended
+health.retry_delay_s    # the longest wait before the reopen, while retrying
+health.failures         # opens and sessions without media since the last with
+
+remove = device_client.add_stream_health_listener(on_change)  # on_change()
+```
+
+`waking` is `connecting` on a battery camera: the library cannot see whether
+the camera was asleep, only that its open pays for a wake when it was.
+`dormant` is the loop having given up after a run of sessions without media;
+nothing reopens until the next `start_keepalive`. `off` is the camera's own
+power switch (`status.powered`), reported whenever nothing is streaming. A
+camera the cloud reports offline is not a state of its own: its opens fail, so
+it reads `retrying`, and `cloud_reports_offline` says why. Where the loop
+holds its reopen for such a camera (up to `AIDOT_OFFLINE_PROBE_S`, sooner once
+the cloud reports it back), `retry_delay_s` is that hold. The states and end
+reasons are listed in `aidot_cameras.camera.stream_health`.
+
+`streaming` means media a viewer can use. On a DTLS camera that is video: a
+session carrying audio alone stays `connecting` until the loop ends it as
+`no_video`. The listener is called only when the snapshot changes, and after
+`async_stop_streaming` the state stays `idle` until the next start.
+
+`last_connect_s` times the one attempt that succeeded, not the failed ones
+before it or the waits between. It is exact on an SDES camera, whose open
+returns on first media, and can read up to half a second long on a DTLS
+camera, where the serve loop polls for it.
+
 ## On-device (SD card) recordings
 
 What the camera holds on its own card, read over a session that already exists,

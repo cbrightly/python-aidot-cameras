@@ -241,6 +241,15 @@ that the camera rebooted (a reboot succeeds by dropping off the network), and
 it refuses when the cloud reports the camera offline. For a few seconds after,
 a viewer gets a session that connects and delivers nothing.
 
+### Firmware version check
+
+`info = await device_client.async_get_firmware_info()` asks the cloud whether
+a newer firmware is on offer, as the AiDot app does when its live page opens.
+It returns a `FirmwareInfo` (`installed_version`, `latest_version`,
+`update_available`; `release_notes` is `None` for now) or `None` when unknown.
+It is read-only: installing stays in the AiDot app. The cloud answers by
+itself, so it works for a sleeping battery camera and never wakes one.
+
 ### Sound detection
 
 ```python
