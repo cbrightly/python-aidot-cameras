@@ -1108,10 +1108,11 @@ def _sdes_serve_port(url: "Optional[str]") -> "Optional[int]":
 _ALLOW_LAN_SERVE_ENV = "AIDOT_ALLOW_LAN_SERVE"
 
 
-def _serve_host(url: "Optional[str]") -> "Optional[str]":
-    """Extract the host from a serve URL (``http://0.0.0.0:PORT/x.ts`` -> ``0.0.0.0``).
+def _serve_host_port(url: "Optional[str]") -> "Optional[tuple[str, Optional[str]]]":
+    """``(host, port text)`` of a serve URL, or None if missing/unparseable.
 
-    Returns None if missing/unparseable.  Pure (unit-testable)."""
+    The port is the text after the host's colon, unchecked, and None when the
+    URL names no port. Pure (unit-testable)."""
     if not url:
         return None
     rest = url.split("://", 1)[1] if "://" in url else url
@@ -1119,8 +1120,20 @@ def _serve_host(url: "Optional[str]") -> "Optional[str]":
     if not hostport:
         return None
     if hostport.startswith("["):  # [ipv6]:port
-        return hostport[1:].split("]", 1)[0]
-    return hostport.rsplit(":", 1)[0] if ":" in hostport else hostport
+        host, _, tail = hostport[1:].partition("]")
+        return host, (tail[1:] if tail.startswith(":") else None)
+    if ":" in hostport:
+        host, port = hostport.rsplit(":", 1)
+        return host, port
+    return hostport, None
+
+
+def _serve_host(url: "Optional[str]") -> "Optional[str]":
+    """Extract the host from a serve URL (``http://0.0.0.0:PORT/x.ts`` -> ``0.0.0.0``).
+
+    Returns None if missing/unparseable.  Pure (unit-testable)."""
+    split = _serve_host_port(url)
+    return split[0] if split is not None else None
 
 
 def _serve_port(url: "Optional[str]") -> "Optional[int]":
@@ -1131,21 +1144,11 @@ def _serve_port(url: "Optional[str]") -> "Optional[int]":
     was told about is invisible to it - which is precisely how the direct serve
     failed: with no relay holding a public port it bound an ephemeral one, and
     go2rtc dialled the advertised port and found nothing.  Pure (unit-testable)."""
-    if not url:
-        return None
-    rest = url.split("://", 1)[1] if "://" in url else url
-    hostport = rest.split("/", 1)[0]
-    if not hostport:
-        return None
-    if hostport.startswith("["):  # [ipv6]:port
-        _, _, tail = hostport.partition("]")
-        port = tail[1:] if tail.startswith(":") else ""
-    elif ":" in hostport:
-        port = hostport.rsplit(":", 1)[1]
-    else:
+    split = _serve_host_port(url)
+    if split is None or split[1] is None:
         return None
     try:
-        return int(port)
+        return int(split[1])
     except ValueError:
         return None
 
@@ -1892,21 +1895,21 @@ def _h264_has_keyframe(data: bytes) -> bool:
     """True if an Annex-B H.264 buffer starts a decodable GOP (contains an IDR
     or SPS NAL).  Used to begin a -c copy serve on a keyframe so ffmpeg/go2rtc
     can decode from the first byte.  NAL type 5 = IDR slice, 7 = SPS."""
-    i, n = 0, len(data)
-    while i < n - 4:
-        if data[i] == 0 and data[i + 1] == 0:
-            if data[i + 2] == 1:
-                if (data[i + 3] & 0x1F) in (5, 7):
-                    return True
-                i += 4
-                continue
-            if data[i + 2] == 0 and i + 4 < n and data[i + 3] == 1:
-                if (data[i + 4] & 0x1F) in (5, 7):
-                    return True
-                i += 5
-                continue
-        i += 1
-    return False
+    # A start code needs its NAL header inside the buffer.  The last position
+    # a 3-byte code may hold is one short of ``limit``; a code AT ``limit`` only
+    # counts as the tail of a 4-byte one (a zero before it, inside this scan).
+    find = data.find
+    limit = len(data) - 4
+    i = 0
+    while True:
+        p = find(b"\x00\x00\x01", i)
+        if p < 0 or p > limit:
+            return False
+        if p == limit and not (p > i and data[p - 1] == 0):
+            return False
+        if (data[p + 3] & 0x1F) in (5, 7):
+            return True
+        i = p + 4
 
 
 class _PersistentMqtt:
@@ -3314,6 +3317,27 @@ class AvioRequestMixin:
             # long since answered.
             pages.cancel()
         return replies
+
+
+class _StopOnceMixin:
+    """``stop()`` for a session whose teardown is its own ``_stop_once``."""
+
+    async def stop(self) -> None:
+        """Tear down the stream: whatever the session's ``_stop_once`` closes
+        (ffmpeg, the peer connection, the MQTT session).
+
+        Safe to call more than once, and from several callers at once: the
+        teardown runs a single time and every call waits for that one run. A
+        second teardown used to re-await a future the first had cancelled (and
+        raise CancelledError), re-close a half-closed peer connection (and hang),
+        or re-log ffmpeg's stderr.
+        """
+        task = getattr(self, "_stop_task", None)
+        if task is None:
+            task = self._stop_task = asyncio.ensure_future(self._stop_once())
+        # Shielded: one caller being cancelled must not abort the teardown the
+        # others are waiting on.
+        await asyncio.shield(task)
 
 
 _SDP_SECRET_ATTRS = ("a=ice-pwd:", "a=psk:")

@@ -68,7 +68,7 @@ from .sdes import (
 from .controls import _CameraControlsMixin, control_session
 from .sd_listing import _CameraSdExtrasMixin, _CameraSdMixin
 from .sd_playback import _CameraSdPlaybackMixin
-from .webrtc_open import _WebRTCOpenMixin
+from .webrtc_open import _PhaseReturn, _WebRTCOpenMixin
 from .sdes_open import _SdesOpenMixin
 from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixin; kept re-exported for back-compat
     _mqtt_timestamp,
@@ -119,6 +119,8 @@ from .protocol import (  # noqa: F401 - re-exported for device_client / back-com
     _parse_alarm_event,
 )
 from .. import settings
+from .._bg_tasks import _BG_TASKS, spawn_bg_for  # noqa: F401 - re-exported
+from ._seq import _ap_seq
 from ..mqtt_config2 import broker_url as _mqtt_broker_url
 from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
 from . import stream_health as _sh
@@ -249,9 +251,8 @@ _DTLS_SERVE_OPEN_TIMEOUT_S = settings.read("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S")
 # hard way". So signalling gets the long wait; ICE keeps the 30s it always had.
 _DTLS_SERVE_ICE_WAIT_S = settings.read("AIDOT_DTLS_SERVE_ICE_WAIT_S")
 
-# Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
-# discarded task can be garbage-collected mid-flight. Discarded on completion.
-_BG_TASKS: set = set()
+# Fire-and-forget tasks, held by a strong ref until done (see _bg_tasks.py).
+_spawn_bg = spawn_bg_for(__name__)
 
 # The status error of a persistent request that found no connection to use.
 _NO_PERSISTENT_MQTT = "no persistent MQTT connection"
@@ -269,21 +270,107 @@ _MQTT_CREDENTIAL_REFETCH_FLOOR = 30.0
 _VIEWER_CHECK_INTERVAL_S = 10.0
 
 
-def _spawn_bg(coro):
-    _t = asyncio.ensure_future(coro)
-    _BG_TASKS.add(_t)
+async def _cloud_request(
+    self,
+    method: str,
+    url: str,
+    *,
+    headers: "Callable[[], dict]",
+    timeout: float,
+    json_body: Any = None,
+    params: Optional[dict] = None,
+) -> Any:
+    """One cloud REST call, as its decoded JSON, with the single auth retry.
 
-    def _done(task):
-        _BG_TASKS.discard(task)
-        # Retrieve the exception so a failing background task doesn't surface as
-        # an unhandled "Task exception was never retrieved" at GC time; log it.
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                _LOGGER.debug("aidot background task failed: %r", exc, exc_info=exc)
+    ``method`` is ``"get"`` or ``"post"``. ``headers`` is called for each
+    attempt, because the retry must carry the token the refresh just issued.
+    Only a dict body is auth-checked: an endpoint that answers with a bare list
+    has already succeeded. A function rather than a method so it serves
+    whatever ``self`` a caller was bound to.
+    """
+    import aiohttp
 
-    _t.add_done_callback(_done)
-    return _t
+    async def _fetch():
+        kwargs: dict = {}
+        if json_body is not None:
+            kwargs["json"] = json_body
+        if params is not None:
+            kwargs["params"] = params
+        async with aiohttp.ClientSession() as session:
+            async with getattr(session, method)(
+                url,
+                headers=headers(),
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                **kwargs,
+            ) as resp:
+                return await resp.json(content_type=None)
+
+    body = await _fetch()
+    if (
+        isinstance(body, dict)
+        and self._is_auth_error(body)
+        and await self._async_refresh_auth_token(body)
+    ):
+        body = await _fetch()  # retry once with the refreshed token
+    return body
+
+
+def _event_recording_list_body(
+    device_id: str, start_ts: int, end_ts: int, page: int, page_size: int
+) -> dict:
+    """The ``eventRecordingList`` request body (EventListRequestParamsBean)."""
+    return {
+        "deviceIds": [device_id],
+        "pageNum": page,
+        "pageSize": page_size,
+        "recordSta": start_ts,
+        "recordEnd": end_ts,
+    }
+
+
+async def _event_recording_list_raw(self, body: dict, *, timeout: float) -> Any:
+    """POST ``body`` to ``eventRecordingList``; the decoded reply, unchecked."""
+    return await _cloud_request(
+        self,
+        "post",
+        f"{self._aidot_v32_base}/playback/eventRecordingList",
+        json_body=body,
+        headers=self._aidot_headers,
+        timeout=timeout,
+    )
+
+
+def _parse_account_notice(
+    payload, methods: "tuple[str, ...]", device_id: str, *, window: int
+) -> "Optional[tuple[dict, dict, Any]]":
+    """``(msg, inner, dev)`` of an account notice meant for ``device_id``.
+
+    None for anything else: a payload that names none of ``methods`` in its
+    first ``window`` characters (the cheap test, before any JSON is parsed),
+    one that does not parse, one whose ``method`` is not in ``methods``, or
+    one that names another device. ``dev`` is falsy when the notice names no
+    device at all; such a notice is passed on.
+    """
+    text = str(payload)[:window]
+    if not any(method in text for method in methods):
+        return None
+    try:
+        msg = json.loads(payload)
+    except Exception:
+        return None
+    if (msg.get("method") or "") not in methods:
+        return None
+    inner = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
+    src = str(msg.get("srcAddr") or "")
+    dev = (
+        inner.get("devId")
+        or inner.get("deviceId")
+        or msg.get("devId")
+        or (src.rsplit(".", 1)[-1] if src else None)
+    )
+    if dev and dev != device_id:
+        return None
+    return msg, inner, dev
 
 
 def _mqtt_publish_delivered(status) -> bool:
@@ -1467,15 +1554,6 @@ def _cb_takes_force_login(cb: Any) -> bool:
         return False
 
 
-class _PhaseReturn:
-    """A region returning on the loop's behalf: the loop returns ``value``."""
-
-    __slots__ = ("value",)
-
-    def __init__(self, value):
-        self.value = value
-
-
 class _LoopContinue:
     """A region continuing the loop."""
 
@@ -1847,7 +1925,7 @@ async def _dtls_serve_loop_serve_cycle(
                     ) from exc
                 _LOGGER.info(
                     "camera %s: serving TS directly on port %d",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     self._ts_serve.port,
                 )
             else:
@@ -2101,7 +2179,7 @@ async def _dtls_serve_loop_serve_cycle(
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_dtls_serve_loop_serve_cycle",
                     exc_info=True,
                 )
@@ -2122,7 +2200,7 @@ async def _dtls_serve_loop_serve_cycle(
                 # every session end released a stdout serve that way).
                 _LOGGER.info(
                     "camera %s: stdout is no longer read - releasing",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                 )
                 ps.idle_release = True
             elif (_publishing and _publish_result.get("error")) or (
@@ -2158,7 +2236,7 @@ async def _dtls_serve_loop_serve_cycle(
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_dtls_serve_loop_serve_cycle",
                     exc_info=True,
                 )
@@ -2178,7 +2256,7 @@ async def _dtls_serve_loop_serve_cycle(
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_dtls_serve_loop_serve_cycle",
                 exc_info=True,
             )
@@ -2700,7 +2778,7 @@ async def _sdes_keepalive_after_session(
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_sdes_keepalive_after_session",
                 exc_info=True,
             )
@@ -2745,7 +2823,7 @@ async def _sdes_keepalive_after_session(
     except Exception:
         _LOGGER.debug(
             "camera %s: swallowed exception in %s",
-            getattr(self, "device_id", "?"),
+            self.device_id,
             "_sdes_keepalive_after_session",
             exc_info=True,
         )
@@ -2849,6 +2927,10 @@ class CameraMixin(
 
     # Optional LAN control client; when attached, attribute writes go local-first.
     _lan_client = None
+
+    #: Set per instance by the device client constructor; this default only
+    #: shows in log lines written before that has run.
+    device_id = "?"
 
     #: The account client's ``settings.StreamSettings``, or None (environment
     #: and defaults only). Read through ``settings.stream_settings_of``.
@@ -3175,7 +3257,7 @@ class CameraMixin(
         except (AttributeError, TypeError):
             _LOGGER.debug(
                 "camera %s: unparseable livePlayResp payload",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 exc_info=True,
             )
 
@@ -3557,22 +3639,18 @@ class CameraMixin(
             _LOGGER.debug("%s failed for %s: %s", label, self.device_id, exc)
             return False
 
-    async def _async_http_wake(self) -> bool:
-        """Wake a battery camera via the cloud HTTP low-power endpoint.
+    async def _async_http_low_power(self, status: str) -> bool:
+        """POST the low-power endpoint with ``status`` ``"wakeup"`` or
+        ``"sleep"``: the app's ``wakeUpOrSleep``, both directions.
 
         Mirrors DeviceWakeUpRepos.j() in the official app (n.java): POST
         ``{smarthome}/api/ipc/devices/{id}/lowPowerActiveState`` with body
-        ``{"deviceId": id, "status": "wakeup"}`` and owner+token headers.  The
-        cloud forwards the wake to the camera's always-on low-power channel, so it
+        ``{"deviceId": id, "status": status}`` and owner+token headers.  The
+        cloud forwards a wake to the camera's always-on low-power channel, so it
         reaches a deeply-sleeping camera that has dropped its MQTT session - unlike
         the MQTT ``lowPowerActiveStateReq``, which only lands if the camera is
         already connected.  Returns True if the request was accepted (HTTP 200).
         """
-        return await self._async_http_low_power("wakeup")
-
-    async def _async_http_low_power(self, status: str) -> bool:
-        """POST the low-power endpoint with ``status`` ``"wakeup"`` or
-        ``"sleep"``: the app's ``wakeUpOrSleep``, both directions."""
         # The wake endpoint (unlike recording/playback) DOES require owner (n.java:71).
         headers = self._leedarson_headers()
         headers["owner"] = self._owner_id()
@@ -3694,28 +3772,22 @@ class CameraMixin(
             self._mqtt_url = _env_mqtt
             return self._mqtt_url
 
-        import aiohttp
-
-        async def _fetch():
-            _hdrs = {
+        def _hdrs():
+            return {
                 k: v
                 for k, v in self._leedarson_headers().items()
                 if k != "Content-Type"
             }
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self._smarthome_base}/commonController/getServerUrlConfig",
-                    headers=_hdrs,
-                    params={"version": "1.0.1", "clientId": f"app-{self.user_id}"},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    return await resp.json(content_type=None)
 
         async def _server_url_config():
-            body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
-                body = await _fetch()  # retry once with the refreshed token
-            return body
+            return await _cloud_request(
+                self,
+                "get",
+                f"{self._smarthome_base}/commonController/getServerUrlConfig",
+                headers=_hdrs,
+                params={"version": "1.0.1", "clientId": f"app-{self.user_id}"},
+                timeout=10,
+            )
 
         # AIDOT_MQTT_CONFIG2: the broker that endpoint named with the password.
         # getServerUrlConfig is still called, alongside, for its "ip" (the
@@ -3903,7 +3975,7 @@ class CameraMixin(
         except Exception:
             _LOGGER.debug(
                 "camera %s: persistent MQTT unavailable",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 exc_info=True,
             )
             pm = None
@@ -4482,10 +4554,9 @@ class CameraMixin(
         the MQTT path below.
         """
         import json as _json
-        import random as _random
         import time as _time
 
-        lan = getattr(self, "_lan_client", None)
+        lan = self._lan_client
         if lan is not None:
             try:
                 if await lan.async_set_attributes({attr: value}):
@@ -4502,7 +4573,7 @@ class CameraMixin(
         user_id = self.user_id
         # camera's local password (from device API dict 'password' field)
         cam_pwd = getattr(getattr(self, "info", None), "device_password", "") or ""
-        seq = f"ap{_random.randint(1000000, 9999999)}"
+        seq = _ap_seq()
         # Web app JS (app-beautified.js:26551) includes userId + password in payload;
         # b6.java does not - camera accepts both, but web format is more complete.
         # directId/parentId are top-level fields of the cloud device record.
@@ -4551,11 +4622,43 @@ class CameraMixin(
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "async_set_device_attribute",
                     exc_info=True,
                 )
         return ok
+
+    def _dev_action_request(self, action: str, params) -> "tuple[str, str]":
+        """``(seq, payload)`` of one ``devActionReq``: the app's envelope.
+
+        ``parentId`` follows the chain every device command uses: the record's
+        ``directId``, then ``parentId``, then the device itself. ``params`` goes
+        on the wire as given.
+        """
+        device_id = self.device_id
+        _dev = self._camera_properties() or {}
+        parent_id = (
+            getattr(getattr(self, "info", None), "direct_id", None)
+            or _dev.get("directId")
+            or _dev.get("parentId")
+            or device_id
+        )
+        seq = _ap_seq()
+        payload = json.dumps(
+            {
+                "method": "devActionReq",
+                "service": "device",
+                "seq": seq,
+                "tst": int(time.time() * 1000),
+                "payload": {
+                    "devId": device_id,
+                    "parentId": parent_id,
+                    "action": action,
+                    "in": params,
+                },
+            }
+        )
+        return seq, payload
 
     async def async_query_device_action(
         self,
@@ -4583,32 +4686,11 @@ class CameraMixin(
         the proven control path, so it is left alone.
         """
         import json as _json
-        import random as _random
-        import time as _time
 
         user_id = self.user_id
         device_id = self.device_id
-        _dev = self._camera_properties() or {}
-        parent_id = (
-            getattr(getattr(self, "info", None), "direct_id", None)
-            or _dev.get("directId")
-            or _dev.get("parentId")
-            or device_id
-        )
-        seq = f"ap{_random.randint(1000000, 9999999)}"
-        payload = _json.dumps(
-            {
-                "method": "devActionReq",
-                "service": "device",
-                "seq": seq,
-                "tst": int(_time.time() * 1000),
-                "payload": {
-                    "devId": device_id,
-                    "parentId": parent_id,
-                    "action": action,
-                    "in": params if params is not None else [],
-                },
-            }
+        seq, payload = self._dev_action_request(
+            action, params if params is not None else []
         )
         publish_items = [
             (f"iot/v1/s/{user_id}/device/devActionReq", payload),
@@ -4718,9 +4800,6 @@ class CameraMixin(
           Payload: {"method": "devActionReq", "service": "device",
                     "payload": {"devId": deviceId, "action": action, "in": params}}
         """
-        import json as _json
-        import random as _random
-        import time as _time
 
         user_id = self.user_id
         device_id = self.device_id
@@ -4734,28 +4813,7 @@ class CameraMixin(
         # `password` is deliberately NOT sent: the H5 passes it to its wrapper,
         # but the wrapper does not put it on the wire, and a read-only
         # `WifiBaseInfo` acks without it.
-        _dev = self._camera_properties() or {}
-        parent_id = (
-            getattr(getattr(self, "info", None), "direct_id", None)
-            or _dev.get("directId")
-            or _dev.get("parentId")
-            or device_id
-        )
-        seq = f"ap{_random.randint(1000000, 9999999)}"
-        payload = _json.dumps(
-            {
-                "method": "devActionReq",
-                "service": "device",
-                "seq": seq,
-                "tst": int(_time.time() * 1000),
-                "payload": {
-                    "devId": device_id,
-                    "parentId": parent_id,
-                    "action": action,
-                    "in": params,
-                },
-            }
-        )
+        seq, payload = self._dev_action_request(action, params)
         pub_topic = f"iot/v1/s/{user_id}/device/devActionReq"
         _LOGGER.info("devActionReq: %s %s -> %s", action, params, device_id)
         return await self._mqtt_device_cmd(
@@ -4848,7 +4906,7 @@ class CameraMixin(
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "async_get_camera_attributes",
                     exc_info=True,
                 )
@@ -4996,28 +5054,18 @@ class CameraMixin(
         Filtered to THIS camera, because the app asks for a whole house at once
         and the reply is not per-device.
         """
-        import aiohttp
-
         body = {"deviceIds": [self.device_id], "total": max(1, int(total))}
 
-        async def _fetch():
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self._aidot_v32_base}/playback/getRecentEventRecordingList",
-                    json=body,
-                    headers=self._aidot_headers(),
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    return await resp.json(content_type=None)
-
         try:
-            data = await _fetch()
             # The auth check reads a dict; a list is already a success here.
-            if isinstance(data, dict):
-                if self._is_auth_error(data) and await self._async_refresh_auth_token(
-                    data
-                ):
-                    data = await _fetch()
+            data = await _cloud_request(
+                self,
+                "post",
+                f"{self._aidot_v32_base}/playback/getRecentEventRecordingList",
+                json_body=body,
+                headers=self._aidot_headers,
+                timeout=30,
+            )
             if isinstance(data, dict):
                 # An envelope means an error, since success is a bare array.
                 _LOGGER.warning(
@@ -5073,31 +5121,13 @@ class CameraMixin(
         Body format from EventListRequestParamsBean: deviceIds (list), recordSta, recordEnd,
         eventCodes (list), areaIds (list), pageNum, pageSize.
         """
-        import aiohttp
-
-        _body = {
-            "deviceIds": [self.device_id],
-            "pageNum": page,
-            "pageSize": page_size,
-            "recordSta": start_ts,
-            "recordEnd": end_ts,
-        }
+        _body = _event_recording_list_body(
+            self.device_id, start_ts, end_ts, page, page_size
+        )
         _LOGGER.debug("eventRecordingList request for %s: %s", self.device_id, _body)
 
-        async def _fetch():
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self._aidot_v32_base}/playback/eventRecordingList",
-                    json=_body,
-                    headers=self._aidot_headers(),
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    return await resp.json(content_type=None)
-
         try:
-            body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
-                body = await _fetch()  # retry once with the refreshed token
+            body = await _event_recording_list_raw(self, _body, timeout=30)
 
             _LOGGER.debug(
                 "eventRecordingList raw response for %s: %s", self.device_id, body
@@ -5181,30 +5211,10 @@ class CameraMixin(
         conclusions in a UI, and collapsing them is a defect this project has
         had to fix before.
         """
-        import aiohttp
-
-        _body = {
-            "deviceIds": [self.device_id],
-            "pageNum": 1,
-            "pageSize": 1,
-            "recordSta": start_ts,
-            "recordEnd": end_ts,
-        }
-
-        async def _fetch():
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self._aidot_v32_base}/playback/eventRecordingList",
-                    json=_body,
-                    headers=self._aidot_headers(),
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    return await resp.json(content_type=None)
+        _body = _event_recording_list_body(self.device_id, start_ts, end_ts, 1, 1)
 
         try:
-            body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
-                body = await _fetch()
+            body = await _event_recording_list_raw(self, _body, timeout=30)
             if not isinstance(body, dict) or body.get("code") != 200:
                 _LOGGER.debug(
                     "eventRecordingList count for %s: %s", self.device_id, body
@@ -5238,23 +5248,15 @@ class CameraMixin(
         Source: the vendor app's own JS bundle -
         GET /api/ipc/recordPlanController/getPackageInfoByDevId?deviceId=
         """
-        import aiohttp
-
-        async def _fetch():
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self._aidot_v32_base}/recordPlanController"
-                    "/getPackageInfoByDevId",
-                    params={"deviceId": self.device_id},
-                    headers=self._aidot_headers(),
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    return await resp.json(content_type=None)
-
         try:
-            body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
-                body = await _fetch()
+            body = await _cloud_request(
+                self,
+                "get",
+                f"{self._aidot_v32_base}/recordPlanController/getPackageInfoByDevId",
+                params={"deviceId": self.device_id},
+                headers=self._aidot_headers,
+                timeout=15,
+            )
             if not isinstance(body, dict) or body.get("code") != 200:
                 _LOGGER.debug("getPackageInfoByDevId for %s: %s", self.device_id, body)
                 return None
@@ -5289,27 +5291,20 @@ class CameraMixin(
           response: data.eventUrlList[0].videoUrlList[]
           each item: {url, type}  (type 1=MP4, type 2=M3U8)
         """
-        import aiohttp
-
         _MIME = {1: "video/mp4", 2: "application/x-mpegURL"}
 
-        async def _fetch():
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self._aidot_v32_base}/playback/getEventVideoUrl",
-                    json={
-                        "deviceId": self.device_id,
-                        "eventList": [{"eventUuid": event_uuid}],
-                    },
-                    headers=self._aidot_headers(),
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    return await resp.json(content_type=None)
-
         try:
-            body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
-                body = await _fetch()  # retry once with the refreshed token
+            body = await _cloud_request(
+                self,
+                "post",
+                f"{self._aidot_v32_base}/playback/getEventVideoUrl",
+                json_body={
+                    "deviceId": self.device_id,
+                    "eventList": [{"eventUuid": event_uuid}],
+                },
+                headers=self._aidot_headers,
+                timeout=15,
+            )
 
             _LOGGER.debug(
                 "getEventVideoUrl code=%s for %s uuid=%s: %d url(s)",
@@ -5378,32 +5373,12 @@ class CameraMixin(
 
         Returns the CDN URL string, or None if no events exist.
         """
-        import aiohttp
-        import time
-
         end_ts = int(time.time() * 1000)
         start_ts = end_ts - 30 * 86_400_000  # look back 30 days
 
-        async def _fetch():
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self._aidot_v32_base}/playback/eventRecordingList",
-                    json={
-                        "deviceIds": [self.device_id],
-                        "pageNum": 1,
-                        "pageSize": 1,
-                        "recordSta": start_ts,
-                        "recordEnd": end_ts,
-                    },
-                    headers=self._aidot_headers(),
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    return await resp.json(content_type=None)
-
         try:
-            body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
-                body = await _fetch()  # retry once with the refreshed token
+            _body = _event_recording_list_body(self.device_id, start_ts, end_ts, 1, 1)
+            body = await _event_recording_list_raw(self, _body, timeout=15)
 
             _LOGGER.debug(
                 "thumbnail eventRecordingList for %s: %s", self.device_id, body
@@ -5550,7 +5525,7 @@ class CameraMixin(
                 except Exception:
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
+                        self.device_id,
                         "async_snapshot",
                         exc_info=True,
                     )
@@ -5642,7 +5617,7 @@ class CameraMixin(
             except (asyncio.CancelledError, Exception):
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "async_stop_streaming",
                     exc_info=True,
                 )
@@ -5654,7 +5629,7 @@ class CameraMixin(
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "async_stop_streaming",
                     exc_info=True,
                 )
@@ -5666,7 +5641,7 @@ class CameraMixin(
             except (asyncio.CancelledError, Exception):
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "async_stop_streaming",
                     exc_info=True,
                 )
@@ -5678,7 +5653,7 @@ class CameraMixin(
             except (asyncio.CancelledError, Exception):
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "async_stop_streaming",
                     exc_info=True,
                 )
@@ -5708,7 +5683,7 @@ class CameraMixin(
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_reap_stream_drain",
                     exc_info=True,
                 )
@@ -5719,7 +5694,7 @@ class CameraMixin(
         except (asyncio.CancelledError, Exception):
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_reap_stream_drain",
                 exc_info=True,
             )
@@ -5798,24 +5773,12 @@ class CameraMixin(
         def _handler(topic, payload) -> None:
             # Runs on the MQTT thread; the callback is handed to the loop the
             # watch was started on, so a consumer may touch loop state in it.
-            if "devUnbindNotif" not in str(payload)[:400]:
-                return
-            try:
-                msg = json.loads(payload)
-            except Exception:
-                return
-            if (msg.get("method") or "") != "devUnbindNotif":
-                return
-            inner = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
-            src = str(msg.get("srcAddr") or "")
-            dev = (
-                inner.get("devId")
-                or inner.get("deviceId")
-                or msg.get("devId")
-                or (src.rsplit(".", 1)[-1] if src else None)
+            notice = _parse_account_notice(
+                payload, ("devUnbindNotif",), device_id, window=400
             )
-            if dev and dev != device_id:
+            if notice is None:
                 return
+            _msg, inner, dev = notice
             if not dev:
                 # The notice's shape is not pinned down; say what came so it
                 # can be. Every watcher on the account acts on such a notice.
@@ -5854,25 +5817,12 @@ class CameraMixin(
         last_poke = [float("-inf")]
 
         def _handler(topic, payload) -> None:
-            text = str(payload)[:600]
-            if "devEventNotif" not in text and "eventNotify" not in text:
-                return
-            try:
-                msg = json.loads(payload)
-            except Exception:
-                return
-            if (msg.get("method") or "") not in ("devEventNotif", "eventNotify"):
-                return
-            inner = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
-            src = str(msg.get("srcAddr") or "")
-            dev = (
-                inner.get("devId")
-                or inner.get("deviceId")
-                or msg.get("devId")
-                or (src.rsplit(".", 1)[-1] if src else None)
+            notice = _parse_account_notice(
+                payload, ("devEventNotif", "eventNotify"), device_id, window=600
             )
-            if dev and dev != device_id:
+            if notice is None:
                 return
+            msg, inner, _dev = notice
             name = str(
                 inner.get("event") or inner.get("eventType") or inner.get("type") or ""
             )[:40]
@@ -5942,7 +5892,7 @@ class CameraMixin(
             except (asyncio.CancelledError, Exception):
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "async_stop_motion_polling",
                     exc_info=True,
                 )
@@ -6284,7 +6234,7 @@ class CameraMixin(
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_register_with_go2rtc",
                 exc_info=True,
             )
@@ -6320,7 +6270,7 @@ class CameraMixin(
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_register_with_go2rtc",
                 exc_info=True,
             )
@@ -6355,7 +6305,7 @@ class CameraMixin(
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_deregister_go2rtc",
                 exc_info=True,
             )
@@ -6512,12 +6462,12 @@ class CameraMixin(
             return None
         try:
             name = self._go2rtc_stream_name()
-            hls_ts.tee_for(name, str(getattr(self, "device_id", "?")))
+            hls_ts.tee_for(name, str(self.device_id))
             return hls_ts.url_for(name)
         except Exception:
             _LOGGER.warning(
                 "camera %s: in-sync HLS unavailable - using go2rtc",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 exc_info=True,
             )
             return None
@@ -6579,7 +6529,7 @@ class CameraMixin(
             or not self._hls_ts_eligible()
         ):
             return None
-        device_id = str(getattr(self, "device_id", "?"))
+        device_id = str(self.device_id)
         try:
             return hls_ts.session_for(self._go2rtc_stream_name(), device_id)
         except Exception:
@@ -6593,7 +6543,7 @@ class CameraMixin(
     def _dtls_publish_kwargs(self, result: dict) -> dict:
         """Keyword arguments for this camera's ``dtls_rtp_publish_run`` thread."""
         kwargs = {
-            "device_id": str(getattr(self, "device_id", "?")),
+            "device_id": str(self.device_id),
             "result": result,
             "stream_settings": settings.stream_settings_of(self),
         }
@@ -6952,7 +6902,7 @@ class CameraMixin(
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_streaming_loop",
                     exc_info=True,
                 )
@@ -7343,7 +7293,7 @@ class CameraMixin(
                 return mode
             _LOGGER.warning(
                 "camera %s: unknown sdes_connection_mode %r; using auto",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 raw,
             )
         return "auto"
@@ -7559,14 +7509,14 @@ class CameraMixin(
             _LOGGER.warning(
                 "camera %s: serve port %s could not be bound (%s) - retrying when"
                 " the camera's session is up",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 port,
                 exc,
             )
             return srv
         _LOGGER.debug(
             "camera %s: holding serve port :%s",
-            getattr(self, "device_id", "?"),
+            self.device_id,
             srv.port,
         )
         return srv
@@ -7965,7 +7915,7 @@ class CameraMixin(
                     except BaseException:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
-                            getattr(self, "device_id", "?"),
+                            self.device_id,
                             "async_open_webrtc_stream",
                             exc_info=True,
                         )

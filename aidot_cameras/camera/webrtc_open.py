@@ -72,8 +72,13 @@ from .protocol import (
 )
 
 from .. import settings
+from .._bg_tasks import spawn_bg_for
+from ._seq import _ap_seq
 
 _LOGGER = logging.getLogger(__name__)
+
+# Background tasks log their failures where camera/client.py's always have.
+_spawn_bg = spawn_bg_for("aidot_cameras.camera.client")
 
 
 def _resolve_future_threadsafe(loop, fut, value) -> None:
@@ -652,7 +657,7 @@ def dtls_on_track(
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_drain_audio",
                     exc_info=True,
                 )
@@ -744,6 +749,17 @@ def make_mqtt_message_handler(
     verbatim; the open registers the returned function on the MQTT stream
     exactly as before.
     """
+
+    def _trace_reply(method, topic: str, msg) -> None:
+        # The origin is read here, on the MQTT thread; only the trace line
+        # itself is handed to the loop.
+        origin = _signal_origin(topic, msg, device_id)
+        loop.call_soon_threadsafe(
+            lambda: _trace(
+                f"camera replied  method={method!r}"
+                f"  endpoint={topic.rsplit('/', 1)[-1]}  {origin}"
+            )
+        )
 
     def _on_mqtt_message(topic: str, payload_str: str) -> None:
         # Never the body: the broker echoes our own webrtcReq (with its
@@ -939,14 +955,7 @@ def make_mqtt_message_handler(
                         ice_config_fut.set_result,
                         {"IceServerList": _req_ice_list},
                     )
-            loop.call_soon_threadsafe(
-                lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
-                    _trace(
-                        f"camera replied  method={m!r}"
-                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
-                    )
-                )
-            )
+            _trace_reply(method, topic, msg)
         elif method in ("setDevAttrNotif", "getDevAttrResp"):
             # Attribute notifications: nothing to do here. (They used to
             # feed a camera-IP pipeline that no longer has a consumer.)
@@ -1002,23 +1011,9 @@ def make_mqtt_message_handler(
             # and needs fresh signaling to continue ICE connectivity checks.
             if inner.get("devId") == device_id:
                 loop.call_soon_threadsafe(camera_reconnect_ev.set)
-            loop.call_soon_threadsafe(
-                lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
-                    _trace(
-                        f"camera replied  method={m!r}"
-                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
-                    )
-                )
-            )
+            _trace_reply(method, topic, msg)
         else:
-            loop.call_soon_threadsafe(
-                lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
-                    _trace(
-                        f"camera replied  method={m!r}"
-                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
-                    )
-                )
-            )
+            _trace_reply(method, topic, msg)
 
     return _on_mqtt_message
 
@@ -1313,7 +1308,8 @@ async def _drain_outgoing_queue(outgoing_q: _SignalQueue, publish) -> None:
 
 
 class _PhaseReturn:
-    """A phase returning on the open's behalf: the open returns ``value``."""
+    """A phase or region returning on its caller's behalf: the open, or the
+    loop, returns ``value``. The one definition; camera/client.py imports it."""
 
     __slots__ = ("value",)
 
@@ -1609,7 +1605,7 @@ async def _dtls_open_head(self, ps: _DtlsOpenState) -> None:
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_dtls_open_head",
                 exc_info=True,
             )
@@ -1958,8 +1954,6 @@ async def _dtls_open_ice_config_and_user_info(self, ps: _DtlsOpenState) -> None:
     Split out of ``_async_open_webrtc_stream_impl``; reads and writes the open's
     state through ``ps`` (a ``_DtlsOpenState``).
     """
-    from .client import _spawn_bg
-
     if ps._fetch_http_ice:
         if ps._http_ice_config:
             ps._status("ICE config fetched via HTTP (primary path, parallel fetch)")
@@ -2034,8 +2028,6 @@ async def _dtls_open_host_candidate_and_ice_config_req(
     Split out of ``_async_open_webrtc_stream_impl``; reads and writes the open's
     state through ``ps`` (a ``_DtlsOpenState``).
     """
-    from .client import _spawn_bg
-
     ps.outgoing_q.put_nowait(
         (
             f"iot/v1/cb/{ps.user_id}/user/connect",
@@ -2068,7 +2060,7 @@ async def _dtls_open_host_candidate_and_ice_config_req(
         ps.device_id,
         ps.user_id,
         ps._numeric_uid_raw,
-        seq=f"ap{random.randint(1000000, 9999999)}",
+        seq=_ap_seq(),
         payload={"devId": ps.device_id, "userId": ps.user_id},
     )
 
@@ -2204,7 +2196,7 @@ async def _dtls_open_wake_and_liveplay(self, ps: _DtlsOpenState) -> None:
         ps.device_id,
         ps.user_id,
         ps._numeric_uid_raw,
-        seq=f"ap{random.randint(1000000, 9999999)}",
+        seq=_ap_seq(),
         payload={
             "peerid": ps.peer_id,
             "devId": ps.device_id,
@@ -2346,7 +2338,7 @@ async def _dtls_open_wake_and_liveplay(self, ps: _DtlsOpenState) -> None:
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_dtls_open_wake_and_liveplay",
                     exc_info=True,
                 )
@@ -2425,7 +2417,6 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
     """
     from aidot_cameras._vendor.aiortc import RTCConfiguration
     from aidot_cameras._vendor.aiortc import RTCIceServer
-    from .client import _spawn_bg
 
     def _sanitize_ice_uris(uris):
         """Remove ?transport= from stun: URIs - invalid per RFC 7064."""
@@ -2656,7 +2647,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
     except Exception:
         _LOGGER.debug(
             "camera %s: could not tag DTLS cert for 1.0 scope",
-            getattr(self, "device_id", "?"),
+            self.device_id,
             exc_info=True,
         )
     # Audio: sendrecv WITHOUT a real audio sender.  Empirical findings
@@ -2844,7 +2835,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_send_avio_heartbeat",
                 exc_info=True,
             )
@@ -2867,7 +2858,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_send_avio_audiostart",
                 exc_info=True,
             )
@@ -2941,7 +2932,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_on_remote_dc_message",
                     exc_info=True,
                 )
@@ -3030,7 +3021,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_on_kvs_dc_message",
                     exc_info=True,
                 )
@@ -3121,7 +3112,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_abort_open",
                     exc_info=True,
                 )
@@ -3175,7 +3166,7 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_dtls_open_offer_and_answer",
                 exc_info=True,
             )
@@ -3188,8 +3179,7 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
     _mlines = [ln for ln in _sdp.splitlines() if ln.startswith("m=")]
     ps._trace("SDP m-sections (%d): %s" % (len(_mlines), " | ".join(_mlines)))
 
-    def _seq() -> str:
-        return f"ap{random.randint(1000000, 9999999)}"
+    _seq = _ap_seq
 
     _offer_sdp = _dedup_bundle_candidates(
         _filter_sdp_candidates(
@@ -3606,9 +3596,9 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
             # when set, a mismatching cert fails the handshake instead.
             _pinned_fp = (settings.read("AIDOT_DTLS_PINNED_FP") or "").strip()
             if not _pinned_fp:
-                _warn_unpinned_peer(getattr(self, "device_id", "?"))
+                _warn_unpinned_peer(self.device_id)
             _accept_camera_cert = _camera_cert_acceptor(
-                _pinned_fp, getattr(self, "device_id", "?"), _RRFp, _rr_cert_fp
+                _pinned_fp, self.device_id, _RRFp, _rr_cert_fp
             )
 
             for _rr_tc in ps.pc.getTransceivers():
@@ -4102,10 +4092,10 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
                 )
 
                 if not _np_pinned_fp:
-                    _warn_unpinned_peer(getattr(self, "device_id", "?"))
+                    _warn_unpinned_peer(self.device_id)
                 _np_accept_cam_cert = _camera_cert_acceptor(
                     _np_pinned_fp,
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     _NPFp,
                     _np_cert_fp,
                 )
@@ -4190,7 +4180,7 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_dtls_open_offer_and_answer",
                     exc_info=True,
                 )
@@ -4670,7 +4660,7 @@ class _WebRTCOpenMixin:
             except OSError as exc:
                 _LOGGER.warning(
                     "camera %s: cannot write %s (%s) - the stream will not be recorded",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     output_path,
                     exc,
                 )
@@ -4690,7 +4680,7 @@ class _WebRTCOpenMixin:
                     _LOGGER.warning(
                         "camera %s: no receiver for the %s track - it will not"
                         " be recorded",
-                        getattr(self, "device_id", "?"),
+                        self.device_id,
                         track.kind,
                     )
                     return

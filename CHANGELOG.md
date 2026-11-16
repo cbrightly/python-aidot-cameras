@@ -6,6 +6,23 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+- **Faster per-frame work on the stream path, with the same bytes out.** The
+  H.264 keyframe check, the Annex-B split, the A-law level measurement and
+  the RTP packet build do less interpreter work per frame and per packet.
+  Each is tested against the previous implementation on about 20,000 inputs.
+- Internal cleanup with no change to the public API: one cloud-request helper
+  in place of seven copies of the fetch-and-retry code, and shared helpers for
+  the event-recording request, the device-action envelope, sequence ids,
+  background tasks, account-notice parsing, recording timestamps, serve-URL
+  parsing and session stop.
+
+### Removed
+- Private names only: `_async_http_wake` (nothing called it; the wake goes
+  through `_async_http_low_power`), the unread `fast_liveplay` parameter of
+  `_sdes_liveplay_echo_timeout` and the unread `abandoned` parameter of
+  `_should_skip_doomed_serve`.
+
 ## [1.4.0]
 
 ### Added

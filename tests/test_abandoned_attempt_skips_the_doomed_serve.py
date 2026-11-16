@@ -40,7 +40,7 @@ from aidot_cameras.camera.sdes_open import _should_skip_doomed_serve
 
 
 def _s(**kw):
-    args = dict(abandoned=True, have_video=False)
+    args = dict(have_video=False)
     args.update(kw)
     return _should_skip_doomed_serve(**args)
 
@@ -71,8 +71,8 @@ def test_the_plain_timeout_path_is_now_skipped_too():
     A permanent failure was being looped on, not a transient tolerated.
 
     A serve with observed video is still served, whichever wait ended."""
-    assert _s(abandoned=False) is True
-    assert _s(abandoned=False, have_video=True) is False
+    assert _s() is True
+    assert _s(have_video=True) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -236,7 +236,7 @@ def test_a_timed_out_attempt_with_nothing_observed_also_skips():
     Env cleared, because this pins the SHIPPED default and the knob is read
     from the ambient environment - an operator who set the documented escape
     hatch would otherwise get a red suite that has nothing to do with them."""
-    assert _should_skip_doomed_serve(abandoned=False, have_video=False) is True
+    assert _should_skip_doomed_serve(have_video=False) is True
 
 
 def test_a_talk_or_snapshot_open_is_never_abandoned():
@@ -245,14 +245,7 @@ def test_a_talk_or_snapshot_open_is_never_abandoned():
     outbound talk does not need inbound media at all - the SRTP session and the
     ICE nomination are already up. Aborting those because no video arrived would
     break the siren on exactly the cameras this was written to help."""
-    assert (
-        _should_skip_doomed_serve(abandoned=False, have_video=False, serving=False)
-        is False
-    )
-    assert (
-        _should_skip_doomed_serve(abandoned=True, have_video=False, serving=False)
-        is False
-    )
+    assert _should_skip_doomed_serve(have_video=False, serving=False) is False
 
 
 def test_the_gate_only_fires_when_a_serve_is_actually_being_built():
@@ -278,11 +271,10 @@ def test_the_gate_only_fires_when_a_serve_is_actually_being_built():
 
 
 def test_the_backstop_case_still_skips():
-    assert _should_skip_doomed_serve(abandoned=True, have_video=False) is True
+    assert _should_skip_doomed_serve(have_video=False) is True
 
 
 def test_an_attempt_that_saw_video_still_serves():
     """Observed video is the whole point - that serve has something to carry,
     whichever way the wait ended."""
-    assert _should_skip_doomed_serve(abandoned=True, have_video=True) is False
-    assert _should_skip_doomed_serve(abandoned=False, have_video=True) is False
+    assert _should_skip_doomed_serve(have_video=True) is False

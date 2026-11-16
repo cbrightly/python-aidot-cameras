@@ -235,6 +235,16 @@ class LanRetryMixin:
     a camera class carries cannot reach them.
     """
 
+    def _own_device_id(self) -> str | None:
+        """This device's id, or None while the constructor has not set one.
+
+        The camera mixin's class default (``"?"``, for log lines) must never
+        become a key in the process-wide sets below: every instance without
+        an id yet would share it.
+        """
+        device_id = getattr(self, "device_id", None)
+        return None if device_id == "?" else device_id
+
     #: Consecutive failed logins so far.  Class-level so it reads correctly
     #: before the first failure, and reset once a session has stayed up for
     #: `_lan_stable_session_s` (see `_mark_session_stable`) or the address
@@ -274,6 +284,12 @@ class LanRetryMixin:
     #: True while reset() is tearing down a connection that is already gone.
     _reset_is_duplicate: bool = False
 
+    #: Consecutive connect+login failures since the last one that worked.
+    _connect_failures: int = 0
+
+    #: True once the give-up line has been logged for the current outage.
+    _gave_up_logged: bool = False
+
     @property
     def lan_address(self) -> Optional[str]:
         """The LAN address the login is tried at, or None before discovery."""
@@ -282,7 +298,7 @@ class LanRetryMixin:
     @property
     def lan_login_failures(self) -> int:
         """Consecutive failed LAN logins; 0 after a login that got through."""
-        return int(getattr(self, "_connect_failures", 0) or 0)
+        return int(self._connect_failures or 0)
 
     @property
     def lan_login_over_ceiling(self) -> bool:
@@ -308,7 +324,7 @@ class LanRetryMixin:
         device's side ends the session, most often another controller taking
         the light's only LAN session.
         """
-        return int(getattr(self, "_short_sessions", 0) or 0) > 0
+        return int(self._short_sessions or 0) > 0
 
     async def async_login(self) -> None:
         """Log in, and let a login that got through clear the failure count.
@@ -323,7 +339,7 @@ class LanRetryMixin:
         await super().async_login()
         if getattr(self, "_connect_and_login", False):
             self._connect_failures = 0
-            _OVER_CEILING.discard(getattr(self, "device_id", None))
+            _OVER_CEILING.discard(self._own_device_id())
 
     async def connect(self, ip_address) -> None:
         """Bound the attempt, so a silent device cannot park it forever.
@@ -347,7 +363,7 @@ class LanRetryMixin:
             # reset() in between may have raced it. Make the flag honest
             # either way.
             self._connecting = False
-        device_id = getattr(self, "device_id", None)
+        device_id = self._own_device_id()
         if getattr(self, "_connect_and_login", False):
             self._connect_failures = 0
             _OVER_CEILING.discard(device_id)
@@ -360,7 +376,7 @@ class LanRetryMixin:
         # at the ceiling until the address changes or a login gets through,
         # and a consumer that keeps asking (the integration's five-minute
         # light poll) still gets its attempt, quietly - see _OVER_CEILING.
-        failures = getattr(self, "_connect_failures", 0) + 1
+        failures = self._connect_failures + 1
         self._connect_failures = failures
         if failures == _LOGIN_RETRY_LIMIT:
             if device_id:
@@ -398,19 +414,19 @@ class LanRetryMixin:
             self._login_attempt = 0
             self._gave_up_logged = False
             self._short_sessions = 0
-            _OVER_CEILING.discard(getattr(self, "device_id", None))
-            _FLAPPING.discard(getattr(self, "device_id", None))
+            _OVER_CEILING.discard(self._own_device_id())
+            _FLAPPING.discard(self._own_device_id())
         elif not getattr(self, "_connect_and_login", False) and (
-            getattr(self, "_connect_failures", 0) >= _LOGIN_RETRY_LIMIT
-            or getattr(self, "_short_sessions", 0) >= _LOGIN_RETRY_LIMIT
+            self._connect_failures >= _LOGIN_RETRY_LIMIT
+            or self._short_sessions >= _LOGIN_RETRY_LIMIT
         ):
             _LOGGER.debug(
                 "%s: not trying the LAN login at %s again (failed %d times, "
                 "closed early %d times)",
                 getattr(self, "device_id", "?"),
                 ip,
-                getattr(self, "_connect_failures", 0),
-                getattr(self, "_short_sessions", 0),
+                self._connect_failures,
+                self._short_sessions,
             )
             return
         # Upstream's own update_ip_address (below, via super()) spawns a fresh
@@ -434,7 +450,7 @@ class LanRetryMixin:
         # a non-closed light left with no login, no retry, and a leaked
         # socket until the next discovery cycle.  Only cancel when upstream's
         # own check says it is about to supersede this with a fresh login.
-        pending = getattr(self, "_lan_retry_task", None)
+        pending = self._lan_retry_task
         if (
             pending is not None
             and pending is not asyncio.current_task()
@@ -458,7 +474,7 @@ class LanRetryMixin:
         )
 
     def _cancel_session_clock(self) -> None:
-        handle = getattr(self, "_session_stable_handle", None)
+        handle = self._session_stable_handle
         if handle is not None:
             handle.cancel()
         self._session_stable_handle = None
@@ -475,8 +491,8 @@ class LanRetryMixin:
         ):
             return
         self._session_started_at = None
-        device_id = getattr(self, "device_id", None)
-        if getattr(self, "_short_sessions", 0) > 0:
+        device_id = self._own_device_id()
+        if self._short_sessions > 0:
             _LOGGER.info(
                 "%s: LAN session has stayed up for %.0fs after %d early "
                 "close(s); treating the light as reachable again.",
@@ -499,8 +515,8 @@ class LanRetryMixin:
         that upstream's reset() calls next waits longer than the last one, and
         gives up at the same ceiling a refused login reaches.
         """
-        device_id = getattr(self, "device_id", None)
-        self._short_sessions = getattr(self, "_short_sessions", 0) + 1
+        device_id = self._own_device_id()
+        self._short_sessions = self._short_sessions + 1
         if device_id:
             _FLAPPING.add(device_id)
         if self._short_sessions == 1:
@@ -533,7 +549,7 @@ class LanRetryMixin:
         No session at all (a refused login, a connect timeout) is not counted
         here - `connect()` counts those.
         """
-        started = getattr(self, "_session_started_at", None)
+        started = self._session_started_at
         self._session_started_at = None
         self._cancel_session_clock()
         if started is not None and not getattr(self, "_is_close", False):
@@ -546,7 +562,7 @@ class LanRetryMixin:
         # socket, no attempt in flight and the first reset's retry still
         # asleep is one of those: let it tear down (a no-op) without
         # scheduling.
-        pending = getattr(self, "_lan_retry_task", None)
+        pending = self._lan_retry_task
         duplicate = (
             started is None
             and getattr(self, "writer", None) is None
@@ -576,18 +592,16 @@ class LanRetryMixin:
         """
         if getattr(self, "_is_close", False):
             return
-        if getattr(self, "_reset_is_duplicate", False):
+        if self._reset_is_duplicate:
             return
-        attempt = getattr(self, "_login_attempt", 0)
+        attempt = self._login_attempt
         delay = _next_login_retry_delay(attempt)
         if delay is None:
             # Once until a login gets through or the address changes: past the
             # ceiling every failed attempt that closes through reset() lands
             # here again, and the line said nothing new after the first time.
             _LOGGER.log(
-                logging.DEBUG
-                if getattr(self, "_gave_up_logged", False)
-                else logging.WARNING,
+                logging.DEBUG if self._gave_up_logged else logging.WARNING,
                 "%s: giving up LAN login after %d consecutive failures (failed "
                 "logins and sessions the light closed early); it will be "
                 "retried when something asks for this device again. Set "
@@ -637,7 +651,7 @@ class LanRetryMixin:
         # its own a few seconds later.  See `update_ip_address` below for the
         # matching cancel on the discovery path, and
         # `_upstream.cancel_pending_reconnect` for the one on close.
-        previous = getattr(self, "_lan_retry_task", None)
+        previous = self._lan_retry_task
         if (
             previous is not None
             and previous is not asyncio.current_task()

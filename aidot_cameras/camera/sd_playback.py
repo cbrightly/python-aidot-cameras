@@ -109,6 +109,22 @@ def _java_day_of_week(year: int, month: int, day: int) -> int:
         return 0
 
 
+def _pack_stimeday(
+    year: int, month: int, day: int, hour: int, minute: int, second: int
+) -> bytes:
+    """The 8-byte TUTK STimeDay of a moment, weekday as Java counts it."""
+    return struct.pack(
+        "<HBBBBBB",
+        year,
+        month,
+        day,
+        _java_day_of_week(year, month, day),
+        hour,
+        minute,
+        second,
+    )
+
+
 def playcontrol_payload(
     command: int,
     record: Any,
@@ -146,7 +162,7 @@ def playcontrol_payload(
             seconds=int(offset_s)
         )
         y, mo, d, h, mi, s = t.year, t.month, t.day, t.hour, t.minute, t.second
-    when = struct.pack("<HBBBBBB", y, mo, d, _java_day_of_week(y, mo, d), h, mi, s)
+    when = _pack_stimeday(y, mo, d, h, mi, s)
     tail = struct.pack("<BB", sd_channel, int(getattr(record, "event", 0)) & 0xFF)
     return (
         head

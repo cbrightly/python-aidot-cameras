@@ -18,6 +18,7 @@ from .protocol import (
     SPEAKER_ACK_TIMEOUT_S,
     AvioRequestMixin,
     AvioResponseRouter,
+    _StopOnceMixin,
     _speaker_ack_accepted,
 )
 from .sd_playback import _PlaybackControls
@@ -36,7 +37,7 @@ _STOP_MQTT_WAIT_S = 5.0
 SDES_SPEAKER_ACK_TIMEOUT_S = SDES_SPEAKERSTART_DELAY + SPEAKER_ACK_TIMEOUT_S
 
 
-class SdesSession(_PlaybackControls, AvioRequestMixin):
+class SdesSession(_PlaybackControls, AvioRequestMixin, _StopOnceMixin):
     """Active SDES-SRTP stream session managed by an ffmpeg subprocess.
 
     Obtain via ``await DeviceClient.async_open_webrtc_stream(...)`` when the
@@ -378,22 +379,6 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
         while self._proc.poll() is None:
             await asyncio.sleep(0.5)
         return self._proc.returncode
-
-    async def stop(self) -> None:
-        """Tear down the stream: terminate ffmpeg and stop MQTT.
-
-        Safe to call more than once, and from several callers at once: the
-        teardown runs a single time and every call waits for that one run. A
-        second teardown used to re-await a future the first had cancelled (and
-        raise CancelledError), re-close a half-closed peer connection (and hang),
-        or re-log ffmpeg's stderr.
-        """
-        task = getattr(self, "_stop_task", None)
-        if task is None:
-            task = self._stop_task = asyncio.ensure_future(self._stop_once())
-        # Shielded: one caller being cancelled must not abort the teardown the
-        # others are waiting on.
-        await asyncio.shield(task)
 
     async def _retime_playback(self) -> None:
         """Move a played recording's .ts onto the recording's own clock.

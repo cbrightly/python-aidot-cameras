@@ -28,18 +28,18 @@ from aidot_cameras.camera.sdes_open import (
 class TestTheDefault:
     def test_both_paths_share_the_one_value(self, monkeypatch):
         monkeypatch.delenv("AIDOT_SDES_LIVEPLAY_ECHO_S", raising=False)
-        assert _sdes_liveplay_echo_timeout(False) == _LIVEPLAY_ECHO_S == 0.25
+        assert _sdes_liveplay_echo_timeout() == _LIVEPLAY_ECHO_S == 0.25
         # The fast-liveplay path was held at 1.5 s only because the 169/169
         # evidence was gathered on the non-fast wait. Measured on its own
         # 2026-09-03 it behaves identically - 22 runs, 22 timeouts at
         # 1500-1501 ms, no echo ever - so it is the same constant now.
-        assert _sdes_liveplay_echo_timeout(True) == _LIVEPLAY_ECHO_S == 0.25
+        assert _sdes_liveplay_echo_timeout() == _LIVEPLAY_ECHO_S == 0.25
 
     def test_it_is_far_below_the_old_five_seconds(self, monkeypatch):
         """The regression this guards: quietly restoring a multi-second wait for
         a message this fleet has never once received."""
         monkeypatch.delenv("AIDOT_SDES_LIVEPLAY_ECHO_S", raising=False)
-        assert _sdes_liveplay_echo_timeout(False) <= 0.5
+        assert _sdes_liveplay_echo_timeout() <= 0.5
 
 
 class TestTheOverride:
@@ -50,18 +50,18 @@ class TestTheOverride:
         """The old behaviour has to remain reachable, or the change cannot be
         measured against it."""
         monkeypatch.setenv("AIDOT_SDES_LIVEPLAY_ECHO_S", raw)
-        assert _sdes_liveplay_echo_timeout(False) == expected
+        assert _sdes_liveplay_echo_timeout() == expected
 
     @pytest.mark.parametrize("raw", ["", "  ", "abc", "-1", "-0.5", "1,5", "None"])
     def test_a_bad_value_falls_back_instead_of_raising(self, monkeypatch, raw):
         """This runs on every open. An unparseable knob must not be able to stop
         a camera streaming."""
         monkeypatch.setenv("AIDOT_SDES_LIVEPLAY_ECHO_S", raw)
-        assert _sdes_liveplay_echo_timeout(False) == _LIVEPLAY_ECHO_S
+        assert _sdes_liveplay_echo_timeout() == _LIVEPLAY_ECHO_S
 
     def test_zero_disables_the_wait_entirely(self, monkeypatch):
         monkeypatch.setenv("AIDOT_SDES_LIVEPLAY_ECHO_S", "0")
-        assert _sdes_liveplay_echo_timeout(True) == 0.0
+        assert _sdes_liveplay_echo_timeout() == 0.0
 
 
 class TestItIsWiredIn:

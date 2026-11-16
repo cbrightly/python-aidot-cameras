@@ -32,8 +32,7 @@ _ALAW_SQUARES = tuple(float(v) * v for v in _ALAW_TO_LINEAR)
 
 def _alaw_mean_square(payload: bytes) -> float:
     """Mean square of an A-law frame, by table lookup."""
-    sq = _ALAW_SQUARES
-    return sum(sq[b] for b in payload) / len(payload)
+    return sum(map(_ALAW_SQUARES.__getitem__, payload)) / len(payload)
 
 
 #: The G.711 codec, under the names ``rtsp_publish`` re-exports.

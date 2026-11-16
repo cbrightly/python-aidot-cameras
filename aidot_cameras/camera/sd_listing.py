@@ -183,6 +183,9 @@ def _session_is_live(session: Any) -> bool:
 class _CameraSdMixin:
     """The on-device recording query, mixed into CameraMixin."""
 
+    #: Log-line placeholder until the device client constructor sets the id.
+    device_id = "?"
+
     @property
     def has_live_session(self) -> bool:
         """Is a stream session up right now?
@@ -214,7 +217,7 @@ class _CameraSdMixin:
             _LOGGER.debug(
                 "SD request %#x failed for %s: %s",
                 cmd,
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 exc,
             )
             return None
@@ -260,7 +263,7 @@ class _CameraSdMixin:
                 _LOGGER.debug(
                     "SD request %#x failed for %s: %s",
                     cmd,
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     exc,
                 )
                 replies = []
@@ -323,7 +326,7 @@ class _CameraSdMixin:
                 complete = False
                 _LOGGER.debug(
                     "SD list for %s: %d of %d records unfilled or outside the window",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     len(records) - len(kept),
                     len(records),
                 )
@@ -462,14 +465,12 @@ def _record_epoch_s(record: Any) -> int:
 
 def _record_stime(record: Any) -> bytes:
     """A record's start as the TUTK STimeDay the delete request carries."""
-    from .sd_playback import _java_day_of_week
+    from .sd_playback import _pack_stimeday
 
-    return struct.pack(
-        "<HBBBBBB",
+    return _pack_stimeday(
         record.year,
         record.month,
         record.day,
-        _java_day_of_week(record.year, record.month, record.day),
         record.hour,
         record.minute,
         record.second,
@@ -546,6 +547,9 @@ def sd_delete_request(
 class _CameraSdExtrasMixin:
     """Thumbnails and deletion for card recordings; mixed into CameraMixin."""
 
+    #: Log-line placeholder until the device client constructor sets the id.
+    device_id = "?"
+
     async def async_get_sd_thumbnails(
         self,
         records: "list",
@@ -581,9 +585,7 @@ class _CameraSdExtrasMixin:
                 max_replies=len(records),
             )
         except Exception as exc:
-            _LOGGER.debug(
-                "SD thumbnails failed for %s: %s", getattr(self, "device_id", "?"), exc
-            )
+            _LOGGER.debug("SD thumbnails failed for %s: %s", self.device_id, exc)
             return {}
         out: "dict[Any, bytes]" = {}
         for reply in replies:
@@ -621,16 +623,14 @@ class _CameraSdExtrasMixin:
                 timeout=timeout,
             )
         except Exception as exc:
-            _LOGGER.debug(
-                "SD delete failed for %s: %s", getattr(self, "device_id", "?"), exc
-            )
+            _LOGGER.debug("SD delete failed for %s: %s", self.device_id, exc)
             return None
         if reply is None:
             return None
         ok = bool(reply.payload) and reply.payload[0] == 0
         _LOGGER.info(
             "camera %s: delete of %d card recording(s) %s",
-            getattr(self, "device_id", "?"),
+            self.device_id,
             len(records),
             "done" if ok else "refused (%r)" % bytes(reply.payload[:4]),
         )

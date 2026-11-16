@@ -65,7 +65,6 @@ _SR_INDEX = {
     8000: 11,
     7350: 12,
 }
-_OFF = ("0", "false", "no", "off")
 
 
 def publish_aac_enabled(stream_settings=None) -> bool:

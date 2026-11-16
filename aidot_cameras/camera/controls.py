@@ -8,7 +8,6 @@ mixin must be combined into CameraMixin (it is not usable standalone).
 
 import json
 import logging
-import random
 import struct
 import time
 
@@ -21,6 +20,7 @@ from .constants import (
     IOTYPE_USER_IPCAM_SETSTREAMCTRL_REQ,
     IOTYPE_USER_IPCAM_SETSTREAMCTRL_RESP,
 )
+from ._seq import _ap_seq
 from .models import (
     FirmwareInfo,
     _cloud_reports_offline,
@@ -501,7 +501,7 @@ class _CameraControlsMixin:
         device_id = self.device_id
         raw = getattr(self, "_raw_device", None)
         raw = raw if isinstance(raw, dict) else {}
-        seq = f"ap{random.randint(1000000, 9999999)}"
+        seq = _ap_seq()
         request = json.dumps(
             {
                 "method": "getVerListReq",

@@ -20,6 +20,7 @@ from .protocol import (
     SPEAKER_ACK_TIMEOUT_S,
     AvioRequestMixin,
     AvioResponseRouter,
+    _StopOnceMixin,
     _speaker_opened,
 )
 from .sd_playback import _PlaybackControls
@@ -41,7 +42,7 @@ def dtls_send_avio(dc: Any, seq: int, cmd: int, payload: bytes = b"") -> None:
     dc.send(avio_frame(seq, cmd, payload))
 
 
-class WebRTCSession(_PlaybackControls, AvioRequestMixin):
+class WebRTCSession(_PlaybackControls, AvioRequestMixin, _StopOnceMixin):
     """Active WebRTC live-stream session for a liveType=2 AiDot camera.
 
     Obtain via ``await DeviceClient.async_open_webrtc_stream(...)``.
@@ -232,22 +233,6 @@ class WebRTCSession(_PlaybackControls, AvioRequestMixin):
         except Exception as exc:
             out["error"] = str(exc)
         return out
-
-    async def stop(self) -> None:
-        """Tear down the stream: close peer connection and MQTT session.
-
-        Safe to call more than once, and from several callers at once: the
-        teardown runs a single time and every call waits for that one run. A
-        second teardown used to re-await a future the first had cancelled (and
-        raise CancelledError), re-close a half-closed peer connection (and hang),
-        or re-log ffmpeg's stderr.
-        """
-        task = getattr(self, "_stop_task", None)
-        if task is None:
-            task = self._stop_task = asyncio.ensure_future(self._stop_once())
-        # Shielded: one caller being cancelled must not abort the teardown the
-        # others are waiting on.
-        await asyncio.shield(task)
 
     async def _stop_once(self) -> None:
         # If two-way talk was active this session, RELEASE the camera speaker

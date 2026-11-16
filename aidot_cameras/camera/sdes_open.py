@@ -13,7 +13,6 @@ import functools
 import hashlib as _hashlib_mod
 import logging
 import os
-import random
 import re
 import secrets as _secrets_mod
 import struct as _struct_mod
@@ -79,8 +78,21 @@ from .protocol import (
 )
 
 from .. import settings
+from .._bg_tasks import spawn_bg_for
+from ._seq import _ap_seq
 
 _LOGGER = logging.getLogger(__name__)
+
+# What AidotFfmpegMissing says when the serve cannot find or launch ffmpeg.
+_FFMPEG_MISSING_MSG = (
+    "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
+    "  Ubuntu/Debian:  sudo apt install ffmpeg\n"
+    "  macOS (Homebrew): brew install ffmpeg\n"
+    "  Windows:         https://ffmpeg.org/download.html"
+)
+
+# Background tasks log their failures where camera/client.py's always have.
+_spawn_bg = spawn_bg_for("aidot_cameras.camera.client")
 
 
 #: What we ask the kernel for on a media receive socket.  The kernel clamps to
@@ -811,7 +823,7 @@ def _send_video_nack(
 _LIVEPLAY_ECHO_S = 0.25
 
 
-def _sdes_liveplay_echo_timeout(fast_liveplay: bool) -> float:
+def _sdes_liveplay_echo_timeout() -> float:
     """Seconds to wait for the livePlayReq echo. Never negative.
 
     A malformed env value is ignored rather than raising: this runs on every
@@ -1649,9 +1661,7 @@ def _audio_pt_wait_s(*, direct_publish: bool, answer_apt) -> float:
     return _AUDIO_PT_GRACE_S
 
 
-def _should_skip_doomed_serve(
-    *, abandoned: bool, have_video: bool, serving: bool = True
-) -> bool:
+def _should_skip_doomed_serve(*, have_video: bool, serving: bool = True) -> bool:
     """Whether to abandon this attempt instead of serving nothing.
 
     What makes a serve doomed is that **no video was observed**, not which wait
@@ -3749,7 +3759,7 @@ def make_sdes_bridge(
                             # Name the camera: an account runs several SDES
                             # cameras at once, and a burst of exits has to be
                             # attributable to one of them.
-                            _br_dev = getattr(self, "device_id", "?")
+                            _br_dev = self.device_id
                             _br_msg = (
                                 "camera %s: SDES bridge: ffmpeg exited with"
                                 " code %d - stopped by teardown"
@@ -3877,7 +3887,7 @@ def make_sdes_bridge(
                             except Exception:
                                 _LOGGER.debug(
                                     "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
+                                    self.device_id,
                                     "_bridge_fn",
                                     exc_info=True,
                                 )
@@ -3891,7 +3901,7 @@ def make_sdes_bridge(
                         except Exception:
                             _LOGGER.debug(
                                 "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
+                                self.device_id,
                                 "_bridge_fn",
                                 exc_info=True,
                             )
@@ -4017,7 +4027,7 @@ def make_sdes_bridge(
                     except Exception:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
-                            getattr(self, "device_id", "?"),
+                            self.device_id,
                             "_bridge_fn",
                             exc_info=True,
                         )
@@ -4029,7 +4039,7 @@ def make_sdes_bridge(
                         except Exception:
                             _LOGGER.debug(
                                 "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
+                                self.device_id,
                                 "_bridge_fn",
                                 exc_info=True,
                             )
@@ -4119,7 +4129,7 @@ def make_sdes_bridge(
                                 except Exception:
                                     _LOGGER.debug(
                                         "camera %s: swallowed exception in %s",
-                                        getattr(self, "device_id", "?"),
+                                        self.device_id,
                                         "_persistent_sdes_cmd",
                                         exc_info=True,
                                     )
@@ -4185,7 +4195,7 @@ def make_sdes_bridge(
                     except Exception:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
-                            getattr(self, "device_id", "?"),
+                            self.device_id,
                             "_resend_avio_living",
                             exc_info=True,
                         )
@@ -4203,7 +4213,7 @@ def make_sdes_bridge(
                         except Exception:
                             _LOGGER.debug(
                                 "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
+                                self.device_id,
                                 "_resend_avio_living",
                                 exc_info=True,
                             )
@@ -4416,7 +4426,7 @@ def make_sdes_bridge(
                         except Exception:
                             _LOGGER.debug(
                                 "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
+                                self.device_id,
                                 "_bridge_fn",
                                 exc_info=True,
                             )
@@ -4523,7 +4533,7 @@ def make_sdes_bridge(
                                         except Exception:
                                             _LOGGER.debug(
                                                 "camera %s: swallowed exception in %s",
-                                                getattr(self, "device_id", "?"),
+                                                self.device_id,
                                                 "_bridge_fn",
                                                 exc_info=True,
                                             )
@@ -4535,7 +4545,7 @@ def make_sdes_bridge(
                         except Exception:
                             _LOGGER.debug(
                                 "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
+                                self.device_id,
                                 "_bridge_fn",
                                 exc_info=True,
                             )
@@ -4682,7 +4692,7 @@ def make_sdes_bridge(
                                 except Exception:
                                     _LOGGER.debug(
                                         "camera %s: swallowed exception in %s",
-                                        getattr(self, "device_id", "?"),
+                                        self.device_id,
                                         "_bridge_fn",
                                         exc_info=True,
                                     )
@@ -5318,7 +5328,7 @@ def make_sdes_bridge(
                                 except Exception:
                                     _LOGGER.debug(
                                         "camera %s: swallowed exception in %s",
-                                        getattr(self, "device_id", "?"),
+                                        self.device_id,
                                         "_bridge_fn",
                                         exc_info=True,
                                     )
@@ -5330,7 +5340,7 @@ def make_sdes_bridge(
                                     except Exception:
                                         _LOGGER.debug(
                                             "camera %s: swallowed exception in %s",
-                                            getattr(self, "device_id", "?"),
+                                            self.device_id,
                                             "_bridge_fn",
                                             exc_info=True,
                                         )
@@ -5437,7 +5447,7 @@ def make_sdes_bridge(
                                     except Exception:
                                         _LOGGER.debug(
                                             "camera %s: swallowed exception in %s",
-                                            getattr(self, "device_id", "?"),
+                                            self.device_id,
                                             "_bridge_fn",
                                             exc_info=True,
                                         )
@@ -5636,7 +5646,7 @@ def make_sdes_bridge(
                             # one, and it is emitted once per session.
                             _LOGGER.info(
                                 "camera %s: video profile %s",
-                                getattr(self, "device_id", "?"),
+                                self.device_id,
                                 describe_video_profile(_pt_out),
                             )
                             # Camera answers BUNDLE (all media on one 5-tuple),
@@ -5898,7 +5908,7 @@ def make_sdes_bridge(
                         except Exception:
                             _LOGGER.debug(
                                 "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
+                                self.device_id,
                                 "_bridge_fn",
                                 exc_info=True,
                             )
@@ -5983,7 +5993,7 @@ def make_sdes_bridge(
             # and the session died minutes later as "stalled".
             _LOGGER.error(
                 "camera %s: SDES bridge ended by an unexpected error",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 exc_info=True,
             )
         finally:
@@ -5992,7 +6002,7 @@ def make_sdes_bridge(
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_bridge_fn",
                     exc_info=True,
                 )
@@ -6001,7 +6011,7 @@ def make_sdes_bridge(
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_bridge_fn",
                     exc_info=True,
                 )
@@ -6165,7 +6175,7 @@ async def _sdes_open_head(self, ps: _SdesOpenState) -> None:
             except Exception:
                 _LOGGER.debug(
                     "camera %s: could not signal MQTT thread to exit",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     exc_info=True,
                 )
 
@@ -6217,10 +6227,7 @@ async def _sdes_open_head(self, ps: _SdesOpenState) -> None:
 
     ps.webrtc_req_topic = f"iot/v1/s/{ps.user_id}/IPC/webrtcReq"
 
-    def _seq() -> str:
-        return f"ap{random.randint(1000000, 9999999)}"
-
-    ps._seq = _seq
+    ps._seq = _ap_seq
 
     # Register a resource with the wrapper's cleanup stack so it is released
     # if the cold open is cancelled/raises before the SdesSession takes
@@ -6236,7 +6243,7 @@ async def _sdes_open_head(self, ps: _SdesOpenState) -> None:
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed sdes-open cleanup step",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     exc_info=True,
                 )
 
@@ -6254,13 +6261,13 @@ async def _sdes_open_allocate_ports(self, ps: _SdesOpenState) -> None:
     import socket as _socket
 
     ps._audio_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-    _widen_media_rcvbuf(ps._audio_sock, "audio", getattr(self, "device_id", "?"))
+    _widen_media_rcvbuf(ps._audio_sock, "audio", self.device_id)
     ps._audio_sock.bind(("0.0.0.0", 0))
     ps.audio_port = ps._audio_sock.getsockname()[1]
     ps._cl(ps._audio_sock.close)  # also unblocks the bridge thread's recv on cleanup
 
     ps._video_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-    _widen_media_rcvbuf(ps._video_sock, "video", getattr(self, "device_id", "?"))
+    _widen_media_rcvbuf(ps._video_sock, "video", self.device_id)
     ps._video_sock.bind(("0.0.0.0", 0))
     ps.video_port = ps._video_sock.getsockname()[1]
     ps._cl(ps._video_sock.close)
@@ -6289,7 +6296,7 @@ async def _sdes_open_allocate_ports(self, ps: _SdesOpenState) -> None:
     except Exception:
         _LOGGER.debug(
             "camera %s: swallowed exception in %s",
-            getattr(self, "device_id", "?"),
+            self.device_id,
             "_sdes_open_allocate_ports",
             exc_info=True,
         )
@@ -6347,7 +6354,7 @@ async def _sdes_open_allocate_ports(self, ps: _SdesOpenState) -> None:
     except Exception:
         _LOGGER.debug(
             "camera %s: swallowed exception in %s",
-            getattr(self, "device_id", "?"),
+            self.device_id,
             "_sdes_open_allocate_ports",
             exc_info=True,
         )
@@ -6431,7 +6438,6 @@ async def _sdes_open_build_offer(self, ps: _SdesOpenState) -> None:
     state through ``ps`` (a ``_SdesOpenState``).
     """
     import asyncio as _asyncio
-    import random as _random
     import secrets as _secrets
     import secrets as _secrets_psk_early
     import base64
@@ -6657,7 +6663,7 @@ async def _sdes_open_build_offer(self, ps: _SdesOpenState) -> None:
         ps.device_id,
         ps.user_id,
         ps.numeric_uid_raw,
-        seq=f"ap{_random.randint(1000000, 9999999)}",
+        seq=_ap_seq(),
         payload={
             "peerid": ps.peer_id,
             "devId": ps.device_id,
@@ -6691,7 +6697,7 @@ async def _sdes_open_build_offer(self, ps: _SdesOpenState) -> None:
     # (_NO_FAST_LIVEPLAY_MODELS, e.g. A001064) are always excluded; disable
     # elsewhere via AIDOT_SDES_FAST_LIVEPLAY={0,false,no,off}.
     ps._skip_lp = self._resolve_sdes_fast_liveplay()
-    _echo_timeout = _sdes_liveplay_echo_timeout(ps._skip_lp)
+    _echo_timeout = _sdes_liveplay_echo_timeout()
     _echo_t0 = time.monotonic()
     try:
         await _asyncio.wait_for(ps.liveplay_echo_ev.wait(), timeout=_echo_timeout)
@@ -6993,7 +6999,7 @@ async def _sdes_open_nat_hole_punch(self, ps: _SdesOpenState) -> None:
     except Exception:
         _LOGGER.debug(
             "camera %s: swallowed exception in %s",
-            getattr(self, "device_id", "?"),
+            self.device_id,
             "_sdes_open_nat_hole_punch",
             exc_info=True,
         )
@@ -7011,7 +7017,7 @@ async def _sdes_open_nat_hole_punch(self, ps: _SdesOpenState) -> None:
                 "camera %s: no TURN entry from cloud; NAT hole-punch will send "
                 "a STUN packet to the hardcoded vendor host %s. Set "
                 "AIDOT_SDES_HOLEPUNCH_HOST to override (empty to disable).",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 ps._hp_host,
             )
     _hp_stun = b"\x00\x01\x00\x00\x21\x12\xa4\x42" + os.urandom(12)
@@ -7025,7 +7031,7 @@ async def _sdes_open_nat_hole_punch(self, ps: _SdesOpenState) -> None:
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_sdes_open_nat_hole_punch",
                     exc_info=True,
                 )
@@ -7038,7 +7044,7 @@ async def _sdes_open_nat_hole_punch(self, ps: _SdesOpenState) -> None:
                 except Exception:
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
+                        self.device_id,
                         "_sdes_open_nat_hole_punch",
                         exc_info=True,
                     )
@@ -7106,7 +7112,7 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_sdes_open_stun_responder_window",
                 exc_info=True,
             )
@@ -7290,7 +7296,7 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                     except Exception:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
-                            getattr(self, "device_id", "?"),
+                            self.device_id,
                             "_sdes_open_stun_responder_window",
                             exc_info=True,
                         )
@@ -7306,7 +7312,7 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "_sdes_open_stun_responder_window",
                 exc_info=True,
             )
@@ -7816,7 +7822,6 @@ class _SdesOpenMixin:
         from .client import _build_sdes_serve_cmd
         from .client import _ffmpeg_path
         from .client import _resolve_serve_input_timeout_s
-        from .client import _spawn_bg
         import subprocess
 
         def _reap(p):
@@ -8536,7 +8541,7 @@ class _SdesOpenMixin:
                     except Exception:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
-                            getattr(self, "device_id", "?"),
+                            self.device_id,
                             "_open_sdes_stream_impl",
                             exc_info=True,
                         )
@@ -8649,7 +8654,6 @@ class _SdesOpenMixin:
                 else _FIRST_MEDIA_WAIT_S
             )
         if _should_skip_doomed_serve(
-            abandoned=_stale_offer_abandoned,
             have_video=_first_video_pt[0] is not None,
             serving=bool(ps.rtsp_push_url or output_path),
         ):
@@ -8667,7 +8671,7 @@ class _SdesOpenMixin:
                 "camera %s: no media %.0fs after the camera answered;"
                 " abandoning this attempt to the retry rather than launching a"
                 " serve with nothing to serve",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 _waited,
             )
             raise AidotCameraNoMedia(waited_s=_waited)
@@ -8692,7 +8696,7 @@ class _SdesOpenMixin:
                 "camera %s: sent video payload type %d against an offer pinned "
                 "to %d, which the in-sync HLS stream cannot carry - re-opening "
                 "[%d of %d]",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 _vpt,
                 _pinned,
                 _mismatches + 1,
@@ -8706,7 +8710,7 @@ class _SdesOpenMixin:
                 "camera %s: still sending video payload type %s against the pin "
                 "after %d re-opens - serving it as it came; the in-sync HLS "
                 "stream gets no video this session",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 _vpt,
                 _mismatches,
             )
@@ -8732,7 +8736,7 @@ class _SdesOpenMixin:
                     "camera %s: the observed payload type is not one this SDP "
                     "advertises; narrowing to the PINNED payload type %d rather "
                     "than the camera's answer (%s).",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     _pin_pt,
                     _answer_video_pt[0],
                 )
@@ -8741,7 +8745,7 @@ class _SdesOpenMixin:
                     "camera %s: the observed payload type is not one this SDP "
                     "advertises; narrowing to payload type %d from the "
                     "camera's negotiated answer instead of advertising both.",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     _answer_video_pt[0],
                 )
         # The serve plan, now with the observed type (see _resolve_serve_plan).
@@ -8759,7 +8763,7 @@ class _SdesOpenMixin:
                 "camera %s: this session negotiated video pt=%s, which the"
                 " direct publisher is not validated for; keeping the ffmpeg"
                 " serve",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 _keep_v,
             )
         # Audio prefers the type observed on the wire and falls back to the
@@ -8785,14 +8789,14 @@ class _SdesOpenMixin:
                 _LOGGER.info(
                     "camera %s: direct publish: attaching audio pt=%d from the"
                     " camera's answer (no audio packet seen yet)",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     _answer_apt,
                 )
             else:
                 _LOGGER.info(
                     "camera %s: no audio packet within %.0fs of the video;"
                     " mapping audio pt=%d from the camera's answer",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     _apt_wait,
                     _answer_apt,
                 )
@@ -8808,7 +8812,7 @@ class _SdesOpenMixin:
                 "camera %s: no audio observed before the serve launched and the "
                 "answer names no audio type, so the audio payload type is "
                 "unknown. Continuing without audio.",
-                getattr(self, "device_id", "?"),
+                self.device_id,
             )
             _serve_audio = False
         # RTSP-PUSH copies EVERY input stream (-c copy). If the audio line was
@@ -8884,7 +8888,7 @@ class _SdesOpenMixin:
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
+                    self.device_id,
                     "_open_sdes_stream_impl",
                     exc_info=True,
                 )
@@ -8913,7 +8917,7 @@ class _SdesOpenMixin:
                     ps.rtsp_push_url,
                     input_timeout_s=_direct_timeout,
                     audio_gain_db=_direct_gain_db,
-                    device_id=str(getattr(self, "device_id", "?")),
+                    device_id=str(self.device_id),
                     include_audio=_direct_audio,
                     # The in-sync HLS TS, when on: a new session per spawn.
                     # Never from a playback session: that TS is the live view.
@@ -8935,7 +8939,7 @@ class _SdesOpenMixin:
         if ps._direct_publish:
             _LOGGER.info(
                 "camera %s: SDES serve: direct RTSP publish (no ffmpeg)%s",
-                getattr(self, "device_id", "?"),
+                self.device_id,
                 "" if _direct_audio else ", video only",
             )
         else:
@@ -8949,12 +8953,7 @@ class _SdesOpenMixin:
             # before launching (avoids a cryptic FileNotFoundError).
             # The sockets and the SDP file are released by the exit stack as this raises.
             ps.outgoing_q.put_nowait(None)  # stop MQTT thread
-            raise AidotFfmpegMissing(
-                "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
-                "  Ubuntu/Debian:  sudo apt install ffmpeg\n"
-                "  macOS (Homebrew): brew install ffmpeg\n"
-                "  Windows:         https://ffmpeg.org/download.html"
-            )
+            raise AidotFfmpegMissing(_FFMPEG_MISSING_MSG)
         try:
             proc = await _spawn_serve()
             _proc_holder[0] = proc
@@ -8963,12 +8962,7 @@ class _SdesOpenMixin:
             # ffmpeg is not installed - clean up and surface a clear error.
             # The sockets and the SDP file are released by the exit stack as this raises.
             ps.outgoing_q.put_nowait(None)  # stop MQTT thread
-            raise AidotFfmpegMissing(
-                "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
-                "  Ubuntu/Debian:  sudo apt install ffmpeg\n"
-                "  macOS (Homebrew): brew install ffmpeg\n"
-                "  Windows:         https://ffmpeg.org/download.html"
-            )
+            raise AidotFfmpegMissing(_FFMPEG_MISSING_MSG)
 
         # Wait until ffmpeg has actually bound the UDP ports before sending
         # webrtcReq.  Popen() returns as soon as the process is created;
@@ -9120,7 +9114,7 @@ class _SdesOpenMixin:
                     except Exception:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
-                            getattr(self, "device_id", "?"),
+                            self.device_id,
                             "_late_second_answer_task",
                             exc_info=True,
                         )

@@ -331,9 +331,14 @@ def parse_rtp(pkt: bytes) -> Optional[Tuple[int, bool, int, int, bytes]]:
     return pt, bool(b1 & 0x80), seq, ts, pkt[off:end]
 
 
+#: Fixed RTP header (V=2, no padding/extension/CSRC) and the RTSP interleaved
+#: prefix (``$``, channel, length), compiled once for the per-packet path.
+_RTP_HEADER = struct.Struct("!BBHII")
+_INTERLEAVED_PREFIX = struct.Struct("!BBH")
+
+
 def build_rtp(pt: int, marker: bool, seq: int, ts: int, ssrc: int, payload) -> bytes:
-    return struct.pack(
-        "!BBHII",
+    return _RTP_HEADER.pack(
         0x80,
         (0x80 if marker else 0) | (pt & 0x7F),
         seq & 0xFFFF,
@@ -702,8 +707,7 @@ class RtspPublisher:
         return self._sock is not None and not self._dead.is_set()
 
     def send_rtp(self, track: PublishTrack, pkt: bytes) -> None:
-        frame = b"$" + bytes((track.channel,)) + struct.pack("!H", len(pkt)) + pkt
-        self._send_raw(frame)
+        self._send_raw(_INTERLEAVED_PREFIX.pack(0x24, track.channel, len(pkt)) + pkt)
         self.packets_sent += 1
         self.bytes_sent += len(pkt)
 
@@ -1806,30 +1810,29 @@ class LoopbackRtpPublisher:
 def split_annexb(data: bytes) -> List[bytes]:
     """NAL units of an Annex-B byte stream (start codes removed)."""
     nals: List[bytes] = []
-    i, n = 0, len(data)
-    starts = []
-    while i + 3 <= n:
-        if data[i] == 0 and data[i + 1] == 0:
-            if data[i + 2] == 1:
-                starts.append((i, i + 3))
-                i += 3
-                continue
-            if i + 4 <= n and data[i + 2] == 0 and data[i + 3] == 1:
-                starts.append((i, i + 4))
-                i += 4
-                continue
-        i += 1
-    if not starts:
+    find = data.find
+    p = find(b"\x00\x00\x01")
+    if p < 0:
         return [data] if data else []
-    for k, (_s, body) in enumerate(starts):
-        end = starts[k + 1][0] if k + 1 < len(starts) else n
+    n = len(data)
+    while True:
+        body = p + 3
+        nxt = find(b"\x00\x00\x01", body)
+        if nxt < 0:
+            end = n
+        elif nxt > body and data[nxt - 1] == 0:
+            # A zero right before the code makes it the 4-byte form.
+            end = nxt - 1
+        else:
+            end = nxt
         nal = data[body:end]
-        # Trailing zero bytes belong to the next start code, not this NAL.
-        while nal.endswith(b"\x00") and len(nal) > 1:
-            nal = nal[:-1]
         if nal:
-            nals.append(nal)
-    return nals
+            # Trailing zero bytes belong to the next start code, not this NAL;
+            # a NAL that is nothing but zeros keeps one byte.
+            nals.append(nal.rstrip(b"\x00") or nal[:1])
+        if nxt < 0:
+            return nals
+        p = nxt
 
 
 def packetize_h264(access_unit: bytes, mtu: int = H264_MTU) -> List[Tuple[bytes, bool]]:

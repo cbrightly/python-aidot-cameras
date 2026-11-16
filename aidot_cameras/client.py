@@ -80,6 +80,7 @@ from .device_client import CameraDeviceClient, LightDeviceClient
 from .device_client import DeviceStatusData as _CarriedStatusData
 from .discover import CameraDiscover
 from . import mqtt_config2
+from ._bg_tasks import _BG_TASKS, spawn_bg_for  # noqa: F401 - re-exported
 from ._log_redaction import mask_identifier
 from . import settings
 from .settings import StreamSettings
@@ -122,26 +123,8 @@ def _store_mqtt_credentials(
     }
 
 
-# Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
-# discarded task can be garbage-collected mid-flight (see camera/client.py).
-_BG_TASKS: set = set()
-
-
-def _spawn_bg(coro):
-    _t = asyncio.ensure_future(coro)
-    _BG_TASKS.add(_t)
-
-    def _done(task):
-        _BG_TASKS.discard(task)
-        # Retrieve the exception so a failing background task doesn't surface as
-        # an unhandled "Task exception was never retrieved" at GC time; log it.
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                _LOGGER.debug("aidot background task failed: %r", exc, exc_info=exc)
-
-    _t.add_done_callback(_done)
-    return _t
+# Fire-and-forget tasks, held by a strong ref until done (see _bg_tasks.py).
+_spawn_bg = spawn_bg_for(__name__)
 
 
 def _is_camera_device(device: dict[str, Any]) -> bool:
