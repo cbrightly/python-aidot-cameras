@@ -4,7 +4,10 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
-## [Unreleased]
+## [1.4.1]
+
+No change in behaviour on any path: the same bytes go out, with less work per
+frame, and the internals are tidier.
 
 ### Changed
 - **Faster per-frame work on the stream path, with the same bytes out.** The
