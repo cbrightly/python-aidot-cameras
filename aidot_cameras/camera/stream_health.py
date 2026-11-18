@@ -99,6 +99,9 @@ END_WRONG_CODEC = "wrong_codec"
 END_BUSY = "busy"
 #: The camera answered that it is not ready yet (waking, encoder cold).
 END_NOT_READY = "not_ready"
+#: The camera's DTLS certificate did not match its pin; the handshake was
+#: refused (see ``CameraDeviceClient.forget_dtls_pin``).
+END_DTLS_PIN_MISMATCH = "dtls_pin_mismatch"
 #: The open failed for any other reason (no answer, ICE never established).
 END_OPEN_FAILED = "open_failed"
 #: The serve loop itself ended on an unexpected error; the camera was released.
@@ -119,6 +122,7 @@ STREAM_END_REASONS: "tuple[str, ...]" = (
     END_WRONG_CODEC,
     END_BUSY,
     END_NOT_READY,
+    END_DTLS_PIN_MISMATCH,
     END_OPEN_FAILED,
     END_ERROR,
 )

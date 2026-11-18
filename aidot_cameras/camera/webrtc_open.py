@@ -72,6 +72,12 @@ from .protocol import (
 )
 
 from .. import settings
+from .dtls_pins import (
+    DtlsPinMismatch,
+    DtlsPinStore,
+    check_learned_pin,
+    normalize_fingerprint,
+)
 from .._bg_tasks import spawn_bg_for
 from ._seq import _ap_seq
 
@@ -198,7 +204,7 @@ def _normalize_fingerprint(value: str) -> str:
     supplied pin that may differ in case, contain/omit colons, or carry stray
     whitespace. Reduces both to lowercase hex with no separators.
     """
-    return value.replace(":", "").replace(" ", "").strip().lower()
+    return normalize_fingerprint(value)
 
 
 def _dtls_pin_matches(real_fp: str, pinned_fp: str) -> bool:
@@ -206,18 +212,77 @@ def _dtls_pin_matches(real_fp: str, pinned_fp: str) -> bool:
     return _normalize_fingerprint(real_fp) == _normalize_fingerprint(pinned_fp)
 
 
-def _warn_unpinned_peer(device_id) -> None:
-    """Say once per open that the camera's DTLS certificate goes unverified."""
+def _check_signaled_fingerprint(real_fp: "Optional[str]", remote_params) -> None:
+    """Raise ``ValueError`` unless ``real_fp`` matches every sha-256
+    fingerprint the camera signaled (what aiortc's own check requires)."""
+    signaled = [
+        f.value
+        for f in remote_params.fingerprints
+        if str(f.algorithm).lower() == "sha-256"
+    ]
+    if (
+        real_fp is None
+        or not signaled
+        or not all(_dtls_pin_matches(real_fp, v) for v in signaled)
+    ):
+        raise ValueError(
+            "DTLS certificate does not match the fingerprint the camera signaled"
+        )
+
+
+def _learned_pin_store(cam) -> "Optional[DtlsPinStore]":
+    """The camera's per-camera pin store, or None when learning is off.
+
+    None when ``AIDOT_DTLS_PIN_LEARN`` is off or the camera has no store (a
+    test double, or a device client built without its account client)."""
+    if not settings.read("AIDOT_DTLS_PIN_LEARN"):
+        return None
+    store = getattr(cam, "dtls_pin_store", None)
+    return store if isinstance(store, DtlsPinStore) else None
+
+
+def _pin_is_enforced(pin_store, device_id) -> bool:
+    """True when ``device_id`` has an enforced pin in ``pin_store``."""
+    if pin_store is None:
+        return False
+    try:
+        record = pin_store.get(str(device_id))
+    except Exception:
+        return False
+    return isinstance(record, dict) and record.get("enforced") is True
+
+
+def _warn_unpinned_peer(device_id, pin_store=None) -> None:
+    """Say once per open how the camera's DTLS certificate will be checked.
+
+    With learning on, the pin store's own log lines say what happens, so this
+    is DEBUG unless the certificate cannot be checked at all."""
+    if pin_store is not None:
+        if not _pin_is_enforced(pin_store, device_id):
+            _LOGGER.debug(
+                "camera %s: DTLS certificate not pinned yet; learning it",
+                device_id,
+            )
+        return
     _LOGGER.warning(
         "camera %s: DTLS peer certificate is NOT authenticated "
         "(signaling echoes our own fingerprint); the media channel "
-        "is exposed to an on-path MITM. Set AIDOT_DTLS_PINNED_FP to "
-        "the camera's sha-256 fingerprint to enforce verification.",
+        "is exposed to an on-path MITM. Leave AIDOT_DTLS_PIN_LEARN on to pin "
+        "each camera's certificate, or set AIDOT_DTLS_PINNED_FP to the "
+        "camera's sha-256 fingerprint.",
         device_id,
     )
 
 
-def _camera_cert_acceptor(pinned_fp: str, device_id, fingerprint_cls, cert_fp_fn):
+def _camera_cert_acceptor(
+    pinned_fp: str,
+    device_id,
+    fingerprint_cls,
+    cert_fp_fn,
+    pin_store=None,
+    on_refused: "Optional[Callable[[], None]]" = None,
+    verify_signaled: bool = False,
+):
     """A ``_validate_peer_identity`` for aiortc's DTLS transport.
 
     The camera echoes OUR fingerprint in its SDP, so signaling carries no
@@ -225,27 +290,58 @@ def _camera_cert_acceptor(pinned_fp: str, device_id, fingerprint_cls, cert_fp_fn
     compare the camera's certificate against our echoed fingerprint and fail
     every handshake. The returned method overwrites the stored fingerprint
     with the camera's actual certificate digest, verified against
-    ``pinned_fp`` when one is set.
+    ``pinned_fp`` when one is set, else against the camera's learned pin in
+    ``pin_store`` (see ``camera/dtls_pins.py``).
 
-    Fails CLOSED under a pin: a missing certificate or any error computing or
-    comparing the fingerprint fails the handshake rather than silently
-    accepting an unverified peer. Unpinned, an unreadable certificate is
-    accepted and noted at DEBUG. Both DTLS paths (role reversal and the
-    normal answer) install this; they used to carry it twice.
+    Fails CLOSED under a pin (``pinned_fp``, or an enforced learned pin): a
+    missing certificate or any error computing or comparing the fingerprint
+    fails the handshake rather than silently accepting an unverified peer.
+    Otherwise an unreadable certificate is accepted and noted at DEBUG. Both
+    DTLS paths (role reversal and the normal answer) install this; they used
+    to carry it twice.
+
+    The learned pin is counted once per DTLS transport, so one handshake is
+    one handshake however many transceivers share the transport.
+
+    ``on_refused`` is called when a pin refuses the handshake, so the open can
+    name that as its failure rather than the ICE or connection loss that
+    follows.
+
+    ``verify_signaled`` keeps aiortc's own check as well: the certificate must
+    also match the fingerprint the camera put in its SDP. For an answer that
+    carried a real fingerprint (not the empty-fingerprint quirk), which
+    aiortc checked before learned pins replaced its validator here. Ignored
+    under ``pinned_fp``, which always replaced it.
     """
+
+    def _refused() -> None:
+        if on_refused is not None:
+            try:
+                on_refused()
+            except Exception:
+                _LOGGER.debug("on_refused callback failed", exc_info=True)
 
     def _accept_camera_cert(self, remote_params):
         try:
             cam_cert = self._ssl.get_peer_certificate(as_cryptography=True)
             real_fp = _verified_dtls_fingerprint(cam_cert, pinned_fp, cert_fp_fn)
+            if verify_signaled and not pinned_fp:
+                _check_signaled_fingerprint(real_fp, remote_params)
+            if not pinned_fp and pin_store is not None:
+                if not getattr(self, "_aidot_pin_checked", False):
+                    check_learned_pin(pin_store, str(device_id), real_fp)
+                    self._aidot_pin_checked = True
             if real_fp is not None:
                 remote_params.fingerprints[:] = [
                     fingerprint_cls(algorithm="sha-256", value=real_fp)
                 ]
-        except ValueError:
+        except ValueError as exc:
+            if pinned_fp or isinstance(exc, DtlsPinMismatch):
+                _refused()
             raise  # pin mismatch / no cert under pin: fail the handshake
         except Exception:
-            if pinned_fp:
+            if pinned_fp or _pin_is_enforced(pin_store, device_id):
+                _refused()
                 raise  # fail closed: never accept an unverifiable cert
             _LOGGER.debug(
                 "camera %s: DTLS cert retrieval failed; accept-any (unpinned)",
@@ -3587,18 +3683,23 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
                 certificate_digest as _rr_cert_fp,
             )
 
-            # Optional certificate pinning. The camera echoes OUR fingerprint
-            # in its SDP, so signaling carries no trustworthy value to verify
-            # the camera against - by default we accept whatever cert it
-            # presents (needed for the role-reversal handshake to complete).
-            # AIDOT_DTLS_PINNED_FP lets an operator pin the camera's real
-            # sha-256 fingerprint (colon-separated hex, as aiortc formats it);
-            # when set, a mismatching cert fails the handshake instead.
+            # Certificate pinning. The camera echoes OUR fingerprint in its
+            # SDP, so signaling carries no trustworthy value to verify the
+            # camera against. AIDOT_DTLS_PINNED_FP pins one sha-256
+            # fingerprint for the process; otherwise each camera's own
+            # certificate is learned and then pinned (camera/dtls_pins.py).
+            # Under either pin a mismatching cert fails the handshake.
             _pinned_fp = (settings.read("AIDOT_DTLS_PINNED_FP") or "").strip()
+            _pin_store = None if _pinned_fp else _learned_pin_store(self)
             if not _pinned_fp:
-                _warn_unpinned_peer(self.device_id)
+                _warn_unpinned_peer(self.device_id, _pin_store)
             _accept_camera_cert = _camera_cert_acceptor(
-                _pinned_fp, self.device_id, _RRFp, _rr_cert_fp
+                _pinned_fp,
+                self.device_id,
+                _RRFp,
+                _rr_cert_fp,
+                _pin_store,
+                functools.partial(setattr, self, "_dtls_pin_refused", True),
             )
 
             for _rr_tc in ps.pc.getTransceivers():
@@ -3873,9 +3974,9 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
         # 32-byte zero fingerprint so the parse succeeds, then patch
         # _validate_peer_identity on each DTLS transport so the actual
         # camera certificate is accepted at handshake time (same pattern
-        # used in the role-reversal branch above).  This is safe because
-        # the MQTT signaling channel is already authenticated; cert
-        # pinning here would add no extra security.
+        # used in the role-reversal branch above).  With no fingerprint in
+        # signaling, the certificate is checked against the camera's pin
+        # (AIDOT_DTLS_PINNED_FP, or its learned pin; camera/dtls_pins.py).
         import re as _fp_re
 
         _ZERO_FP = ":".join(["00"] * 32)
@@ -4074,15 +4175,17 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
         # fingerprints (camera's empty-fingerprint quirk applies on
         # every webrtcResp from this firmware family).
         # Install our peer-cert validator when EITHER the camera's empty-
-        # fingerprint quirk needs the workaround (_fp_subs) OR a pin is
-        # configured. Pinning must be enforced even when the camera sent a
-        # REAL fingerprint: that fingerprint rides attacker-influenceable
-        # signaling, so a MITM can present a well-formed value matching its
-        # own cert and aiortc's native check would pass. Gating the pin on
-        # _fp_subs (empty-fingerprint only) left it silently inert for cameras
-        # that present a real fingerprint.
+        # fingerprint quirk needs the workaround (_fp_subs) OR a pin is in
+        # play (AIDOT_DTLS_PINNED_FP, or the camera's learned pin). Pinning
+        # must be enforced even when the camera sent a REAL fingerprint: that
+        # fingerprint rides attacker-influenceable signaling, so a MITM can
+        # present a well-formed value matching its own cert and aiortc's
+        # native check would pass. Gating the pin on _fp_subs (empty-
+        # fingerprint only) left it silently inert for cameras that present a
+        # real fingerprint.
         _np_pinned_fp = (settings.read("AIDOT_DTLS_PINNED_FP") or "").strip()
-        if _fp_subs or _np_pinned_fp:
+        _np_pin_store = None if _np_pinned_fp else _learned_pin_store(self)
+        if _fp_subs or _np_pinned_fp or _np_pin_store is not None:
             import types as _np_types
 
             try:
@@ -4092,12 +4195,15 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
                 )
 
                 if not _np_pinned_fp:
-                    _warn_unpinned_peer(self.device_id)
+                    _warn_unpinned_peer(self.device_id, _np_pin_store)
                 _np_accept_cam_cert = _camera_cert_acceptor(
                     _np_pinned_fp,
                     self.device_id,
                     _NPFp,
                     _np_cert_fp,
+                    _np_pin_store,
+                    functools.partial(setattr, self, "_dtls_pin_refused", True),
+                    verify_signaled=not _fp_subs,
                 )
 
                 # Diag: log PC/ICE state at patch-application time so we

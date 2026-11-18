@@ -84,6 +84,7 @@ from ._bg_tasks import _BG_TASKS, spawn_bg_for  # noqa: F401 - re-exported
 from ._log_redaction import mask_identifier
 from . import settings
 from .settings import StreamSettings
+from .camera.dtls_pins import DtlsPinStore, MemoryDtlsPinStore
 from .exceptions import AidotAuthFailed
 
 _LOGGER = logging.getLogger(__name__)
@@ -277,6 +278,7 @@ class CameraClient(_UpstreamAidotClient):
         password: str | None = None,
         token: dict | None = None,
         stream_settings: Optional[StreamSettings] = None,
+        dtls_pin_store: Optional[DtlsPinStore] = None,
     ) -> None:
         # Given to every camera this client creates, so two clients in one
         # process never share these knobs (see settings.StreamSettings).
@@ -285,6 +287,14 @@ class CameraClient(_UpstreamAidotClient):
         ):
             raise TypeError("stream_settings must be a StreamSettings")
         self.stream_settings: Optional[StreamSettings] = stream_settings
+        # Where each DTLS camera's learned certificate pin is kept (see
+        # camera/dtls_pins.py). A host passes its own to keep pins across
+        # restarts; without one they last as long as this client.
+        if dtls_pin_store is None:
+            dtls_pin_store = MemoryDtlsPinStore()
+        elif not isinstance(dtls_pin_store, DtlsPinStore):
+            raise TypeError("dtls_pin_store must have get, set and delete methods")
+        self.dtls_pin_store: DtlsPinStore = dtls_pin_store
         # These must exist BEFORE super().__init__: upstream's constructor ends
         # with self.setup_discover(), and our override reads self.login_info.
         self._login_info: dict[str, Any] = {}
@@ -971,6 +981,7 @@ class CameraClient(_UpstreamAidotClient):
                 login_info=self.login_info,
                 client=self,
                 stream_settings=self.stream_settings,
+                dtls_pin_store=self.dtls_pin_store,
             )
             # Let the camera HTTP calls force a token refresh on 21026
             # ("Please login again") and retry.

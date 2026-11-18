@@ -314,6 +314,12 @@ KNOBS: "dict[str, Knob]" = _registry(
     Knob("AIDOT_ALLOW_LAN_SERVE", False, "bool_off"),
     Knob("AIDOT_DTLS_PINNED_FP", None, "str"),
     Knob(
+        "AIDOT_DTLS_PIN_LEARN",
+        True,
+        "bool_on",
+        note="learn and pin each DTLS camera's certificate (camera/dtls_pins.py)",
+    ),
+    Knob(
         "AIDOT_ALLOW_PLAINTEXT_MQTT",
         False,
         "bool_off",

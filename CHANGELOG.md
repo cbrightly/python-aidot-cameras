@@ -4,6 +4,33 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [Unreleased]
+
+### Security
+- **DTLS cameras' certificates are now pinned per camera.** The A000088's
+  signaling carries nothing to check its DTLS certificate against, so unless
+  `AIDOT_DTLS_PINNED_FP` was set, any certificate was accepted and someone on
+  the network path could stand in for the camera. Each camera's first
+  certificate is now recorded, and pinned once the same certificate has been
+  presented on 3 handshakes in a row; after that any other certificate fails
+  the handshake. A certificate that changes before it is pinned starts the
+  learning again, so a camera that makes a new certificate every session keeps
+  streaming, unverified as before, with one warning. Turn learning off with
+  `AIDOT_DTLS_PIN_LEARN=0`. `AIDOT_DTLS_PINNED_FP` still works and wins.
+
+### Added
+- `CameraClient(..., dtls_pin_store=...)`: where the learned pins are kept.
+  Any object with synchronous `get`, `set` and `delete`, holding JSON-safe
+  records, so a host can persist them in its own storage. The default,
+  `MemoryDtlsPinStore`, keeps them for the life of the client. Both
+  `DtlsPinStore` and `MemoryDtlsPinStore` are exported from the package root.
+- `CameraDeviceClient.dtls_pin` (the camera's pin record) and
+  `CameraDeviceClient.forget_dtls_pin()` (drop it after a camera reset, so the
+  next open learns the new certificate).
+- `AidotDtlsPinMismatch` (an `AidotNegotiationFailed`), raised by an open whose
+  handshake a pin refused, and the stream-health end reason
+  `dtls_pin_mismatch`.
+
 ## [1.4.1]
 
 No change in behaviour on any path: the same bytes go out, with less work per

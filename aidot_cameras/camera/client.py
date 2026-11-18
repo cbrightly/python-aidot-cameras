@@ -19,6 +19,7 @@ from ..exceptions import (
     AidotCameraNoMedia,
     AidotCameraNotReady,
     AidotCameraWrongCodec,
+    AidotDtlsPinMismatch,
     AidotIceNotEstablished,
 )
 from ..const import APP_ID as _AIDOT_APP_ID
@@ -1631,6 +1632,8 @@ def _open_failure_reason(exc: BaseException) -> str:
         return _sh.END_WRONG_CODEC
     if isinstance(exc, AidotCameraNoMedia):
         return _sh.END_NO_MEDIA
+    if isinstance(exc, AidotDtlsPinMismatch):
+        return _sh.END_DTLS_PIN_MISMATCH
     return _sh.END_OPEN_FAILED
 
 
@@ -2318,6 +2321,10 @@ async def _dtls_serve_loop_session_end(
         return None
     _n = ps._session_pacer.attempt
     _end_reason = _dtls_end_reason(str(ps._session_end_reason), _camera_close)
+    if getattr(self, "_dtls_pin_refused", False):
+        # The handshake was refused on the pin after the open returned, so
+        # the connection failed rather than the open: say why.
+        _end_reason = _sh.END_DTLS_PIN_MISMATCH
     if _wait is None:
         _sh._tracker_of(self).ending(_end_reason)
         _LOGGER.warning(
@@ -2936,6 +2943,14 @@ class CameraMixin(
     #: and defaults only). Read through ``settings.stream_settings_of``.
     stream_settings = None
 
+    #: The account client's ``DtlsPinStore`` (``camera/dtls_pins.py``), or
+    #: None: then this camera's DTLS certificate is not learned or pinned.
+    dtls_pin_store = None
+
+    #: Set when a DTLS handshake on the latest open was refused on a pin;
+    #: cleared at the start of each open. Read to name the failure.
+    _dtls_pin_refused = False
+
     # MQTT credential state, defaulted at class level so the credential path is
     # safe on any client whose __init__ did not run to completion.
     _mqtt_credential_refresh_cb = None
@@ -3326,6 +3341,35 @@ class CameraMixin(
         is gone. The serve loops' offline pause, the open-failure log level
         and the reboot guard ask this same question."""
         return _cloud_reports_offline(self)
+
+    @property
+    def dtls_pin(self) -> "Optional[dict]":
+        """This camera's learned DTLS pin record, or None.
+
+        A copy of what the pin store holds: ``fingerprint`` (lowercase hex),
+        ``seen`` (handshakes in a row that presented it), ``enforced`` (True
+        once a different certificate fails the handshake) and ``changes``
+        (how often the certificate changed before it was pinned). Reading it
+        sends nothing. ``AIDOT_DTLS_PINNED_FP``, when set, wins over it.
+        """
+        store = self.dtls_pin_store
+        if store is None:
+            return None
+        record = store.get(str(self.device_id))
+        return dict(record) if isinstance(record, dict) else None
+
+    def forget_dtls_pin(self) -> None:
+        """Drop this camera's learned DTLS pin.
+
+        For a camera that was reset or replaced and now presents a new
+        certificate: its next open records the new one and pins it again
+        after a few handshakes. Does nothing without a pin store, and does
+        not touch ``AIDOT_DTLS_PINNED_FP``.
+        """
+        store = self.dtls_pin_store
+        if store is not None:
+            store.delete(str(self.device_id))
+        self._dtls_pin_refused = False
 
     @property
     def stream_health(self) -> _sh.StreamHealth:
@@ -7890,6 +7934,7 @@ class CameraMixin(
         # connection, the track tasks and the recorder's file.
         abort_holder: list = []
         async with _get_webrtc_open_gate():
+            self._dtls_pin_refused = False
             try:
                 session = await self._async_open_webrtc_stream_impl(
                     on_frame,
@@ -7908,7 +7953,7 @@ class CameraMixin(
                 )
                 self._note_direct_session(session)
                 return session
-            except BaseException:
+            except BaseException as _open_exc:
                 if abort_holder:
                     try:
                         await abort_holder[-1]()
@@ -7919,4 +7964,13 @@ class CameraMixin(
                             "async_open_webrtc_stream",
                             exc_info=True,
                         )
+                if self._dtls_pin_refused and not isinstance(
+                    _open_exc, (AidotDtlsPinMismatch, asyncio.CancelledError)
+                ):
+                    # The handshake failed on the pin; whatever the open saw
+                    # next (ICE or connection failure, a timeout) is a symptom.
+                    raise AidotDtlsPinMismatch(
+                        "camera %s: its DTLS certificate does not match the pinned one"
+                        % self.device_id
+                    ) from _open_exc
                 raise
