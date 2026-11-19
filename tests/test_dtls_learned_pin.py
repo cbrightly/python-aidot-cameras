@@ -478,3 +478,56 @@ def test_the_empty_fingerprint_quirk_skips_the_signaled_check():
     zero = ":".join(["00"] * 32)
     assert _handshake(acc, CERT_A).fingerprints[0].value == CERT_A
     acc(_Transport(CERT_A), _signaled(zero))  # placeholder never matches; ignored
+
+
+class _LocalParams:
+    def __init__(self, values):
+        self.fingerprints = [_Fp("sha-256", v) for v in values]
+
+
+class _EchoTransport(_Transport):
+    """A transport whose own certificate is ``local``, as aiortc reports it."""
+
+    def __init__(self, cert, local):
+        super().__init__(cert)
+        self._local = local
+
+    def getLocalParameters(self):
+        return _LocalParams([self._local])
+
+
+OURS = ":".join(["99", "88", "77", "66"] * 8)
+
+
+def test_an_answer_echoing_our_own_fingerprint_is_left_to_the_pin():
+    # Some answers carry our own fingerprint instead of an empty line. It says
+    # nothing about the camera, so it is handled like the empty shape: the
+    # learned pin decides, and the camera's certificate is still learned.
+    store = MemoryDtlsPinStore()
+    acc = _camera_cert_acceptor("", DEV, _Fp, _fp_fn, store, verify_signaled=True)
+    for _ in range(LEARN_HANDSHAKES):
+        params = _signaled(OURS.lower())
+        acc(_EchoTransport(CERT_A, OURS), params)
+        assert params.fingerprints[0].value == CERT_A
+    assert store.get(DEV)["enforced"] is True
+    with pytest.raises(DtlsPinMismatch):
+        acc(_EchoTransport(CERT_B, OURS), _signaled(OURS))
+
+
+def test_a_real_signaled_fingerprint_that_is_not_ours_is_still_checked():
+    store = MemoryDtlsPinStore()
+    acc = _camera_cert_acceptor("", DEV, _Fp, _fp_fn, store, verify_signaled=True)
+    with pytest.raises(ValueError, match="signaled"):
+        acc(_EchoTransport(CERT_B, OURS), _signaled(CERT_A))
+    # Ours alongside a foreign value is not an echo.
+    params = _Params()
+    params.fingerprints = [_Fp("sha-256", OURS), _Fp("sha-256", CERT_A)]
+    with pytest.raises(ValueError, match="signaled"):
+        acc(_EchoTransport(CERT_B, OURS), params)
+
+
+def test_an_unreadable_local_certificate_keeps_the_signaled_check():
+    store = MemoryDtlsPinStore()
+    acc = _camera_cert_acceptor("", DEV, _Fp, _fp_fn, store, verify_signaled=True)
+    with pytest.raises(ValueError, match="signaled"):
+        acc(_Transport(CERT_A), _signaled(OURS))
