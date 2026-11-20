@@ -17,6 +17,10 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   learning again, so a camera that makes a new certificate every session keeps
   streaming, unverified as before, with one warning. Turn learning off with
   `AIDOT_DTLS_PIN_LEARN=0`. `AIDOT_DTLS_PINNED_FP` still works and wins.
+  A refused handshake fails the open at once with `AidotDtlsPinMismatch`,
+  rather than after the whole ICE wait. An answer that echoes the client's
+  own fingerprint, instead of leaving the line empty, is handled like the
+  empty shape: the pin decides.
 
 ### Added
 - `CameraClient(..., dtls_pin_store=...)`: where the learned pins are kept.

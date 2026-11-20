@@ -24,6 +24,7 @@ if TYPE_CHECKING:  # import cost stays out of the runtime path
 from ..exceptions import (
     AidotCameraBusy,
     AidotCameraNotReady,
+    AidotDtlsPinMismatch,
     AidotIceNotEstablished,
     AidotLivePlayRefused,
     AidotMqttUnavailable,
@@ -212,14 +213,40 @@ def _dtls_pin_matches(real_fp: str, pinned_fp: str) -> bool:
     return _normalize_fingerprint(real_fp) == _normalize_fingerprint(pinned_fp)
 
 
-def _check_signaled_fingerprint(real_fp: "Optional[str]", remote_params) -> None:
+def _local_fingerprints(transport) -> list:
+    """Our own sha-256 fingerprints on ``transport``, or [] when unreadable."""
+    try:
+        return [
+            f.value
+            for f in transport.getLocalParameters().fingerprints
+            if str(f.algorithm).lower() == "sha-256"
+        ]
+    except Exception:
+        return []
+
+
+def _check_signaled_fingerprint(
+    real_fp: "Optional[str]", remote_params, local_fps=()
+) -> None:
     """Raise ``ValueError`` unless ``real_fp`` matches every sha-256
-    fingerprint the camera signaled (what aiortc's own check requires)."""
+    fingerprint the camera signaled (what aiortc's own check requires).
+
+    An answer whose fingerprints are all our OWN (``local_fps``) is the
+    camera echoing our offer back: it says nothing about the camera's
+    certificate, so it is treated like the empty-fingerprint shape and left
+    to the pin. That gives an attacker on signaling nothing an empty
+    fingerprint did not already give them."""
     signaled = [
         f.value
         for f in remote_params.fingerprints
         if str(f.algorithm).lower() == "sha-256"
     ]
+    if (
+        signaled
+        and local_fps
+        and all(any(_dtls_pin_matches(v, own) for own in local_fps) for v in signaled)
+    ):
+        return
     if (
         real_fp is None
         or not signaled
@@ -266,7 +293,7 @@ def _warn_unpinned_peer(device_id, pin_store=None) -> None:
         return
     _LOGGER.warning(
         "camera %s: DTLS peer certificate is NOT authenticated "
-        "(signaling echoes our own fingerprint); the media channel "
+        "(signaling carries no fingerprint of its own); the media channel "
         "is exposed to an on-path MITM. Leave AIDOT_DTLS_PIN_LEARN on to pin "
         "each camera's certificate, or set AIDOT_DTLS_PINNED_FP to the "
         "camera's sha-256 fingerprint.",
@@ -285,9 +312,10 @@ def _camera_cert_acceptor(
 ):
     """A ``_validate_peer_identity`` for aiortc's DTLS transport.
 
-    The camera echoes OUR fingerprint in its SDP, so signaling carries no
-    trustworthy value to verify the camera against; aiortc's own check would
-    compare the camera's certificate against our echoed fingerprint and fail
+    The camera's SDP carries no trustworthy value to verify it against: on
+    role reversal it echoes OUR fingerprint, and its answer has empty
+    fingerprint lines (or, from some firmware, our own echoed back). aiortc's
+    own check would compare the camera's certificate against that and fail
     every handshake. The returned method overwrites the stored fingerprint
     with the camera's actual certificate digest, verified against
     ``pinned_fp`` when one is set, else against the camera's learned pin in
@@ -310,8 +338,10 @@ def _camera_cert_acceptor(
     ``verify_signaled`` keeps aiortc's own check as well: the certificate must
     also match the fingerprint the camera put in its SDP. For an answer that
     carried a real fingerprint (not the empty-fingerprint quirk), which
-    aiortc checked before learned pins replaced its validator here. Ignored
-    under ``pinned_fp``, which always replaced it.
+    aiortc checked before learned pins replaced its validator here. An answer
+    that only echoes our own fingerprint skips that check and is left to the
+    pin, as the empty shape is. Ignored under ``pinned_fp``, which always
+    replaced it.
     """
 
     def _refused() -> None:
@@ -326,7 +356,9 @@ def _camera_cert_acceptor(
             cam_cert = self._ssl.get_peer_certificate(as_cryptography=True)
             real_fp = _verified_dtls_fingerprint(cam_cert, pinned_fp, cert_fp_fn)
             if verify_signaled and not pinned_fp:
-                _check_signaled_fingerprint(real_fp, remote_params)
+                _check_signaled_fingerprint(
+                    real_fp, remote_params, _local_fingerprints(self)
+                )
             if not pinned_fp and pin_store is not None:
                 if not getattr(self, "_aidot_pin_checked", False):
                     check_learned_pin(pin_store, str(device_id), real_fp)
@@ -4523,7 +4555,11 @@ async def _dtls_open_ice_candidates_and_connect(
     _reconnect_resent_count = (
         0  # counter: re-send webrtcResp+ICE on each reconnect (max 3)
     )
-    while not connected_ev.is_set() and time.monotonic() < deadline:
+    while (
+        not connected_ev.is_set()
+        and not getattr(self, "_dtls_pin_refused", False)
+        and time.monotonic() < deadline
+    ):
         # Drain incoming ICE candidates from the camera
         while True:
             try:
@@ -4672,6 +4708,19 @@ async def _dtls_open_ice_candidates_and_connect(
         # completes (connected_ev set synchronously in the state handler)
         # instead of waiting out the remaining sleep.
         await _wait_or_event(connected_ev, 0.1)
+
+    if getattr(self, "_dtls_pin_refused", False) and ps.pc.connectionState not in (
+        "connected",
+        "completed",
+    ):
+        # A pin refused the camera's certificate. aiortc leaves the connection
+        # at "connecting" after a refused handshake, so without this the open
+        # would wait out the whole ICE budget before saying so.
+        await ps._abort_open()
+        raise AidotDtlsPinMismatch(
+            f"async_open_webrtc_stream: camera {self.device_id}: its DTLS "
+            "certificate does not match its pin"
+        )
 
     if ps.pc.connectionState not in ("connected", "completed"):
         await ps._abort_open()

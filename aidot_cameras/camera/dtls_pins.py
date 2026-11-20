@@ -1,9 +1,11 @@
 """Per-camera DTLS certificate pinning, learned on first use.
 
-A DTLS camera (A000088) echoes our own fingerprint in its SDP, or sends an
-empty one, so signaling carries nothing to verify the camera's certificate
-against. ``AIDOT_DTLS_PINNED_FP`` pins one fingerprint for the whole process,
-which suits the CLI and one camera but not a home with several.
+A DTLS camera (A000088) puts nothing of its own in signaling to verify its
+certificate against: on role reversal it echoes our own fingerprint, and its
+answer carries empty fingerprint lines (an answer that echoes our own
+fingerprint instead is handled the same way). ``AIDOT_DTLS_PINNED_FP`` pins
+one fingerprint for the whole process, which suits the CLI and one camera but
+not a home with several.
 
 This module keeps one pin per camera instead. The first certificate a camera
 presents is recorded; once the same certificate has been presented on
