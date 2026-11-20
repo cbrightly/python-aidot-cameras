@@ -4,7 +4,16 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
-## [Unreleased]
+## [1.5.0]
+
+DTLS cameras (the A000088 / M3 Pro) now have their certificate checked: each
+camera's certificate is learned on first use and pinned once it repeats, so a
+device that stands in for the camera on the network is refused. A camera whose
+certificate changes every session keeps streaming as before. The pins live in
+memory unless the host passes a store; Home Assistant integration 2.45.0 and
+later keeps them across restarts. On the real fleet the certificate was the
+same on every session on firmware V1.05.09 and V2.00.01, and across a reboot
+on V1.05.09.
 
 ### Security
 - **DTLS cameras' certificates are now pinned per camera.** The A000088's
