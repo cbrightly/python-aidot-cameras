@@ -13,8 +13,8 @@ What it copies from the real camera, because the client depends on it:
   fills in a placeholder, so the only thing that can refuse the camera's
   certificate is the camera's pin (learned, or AIDOT_DTLS_PINNED_FP).
   ``fingerprint_mode="echo"`` puts the client's OWN fingerprint in the answer
-  instead. The client checks a fingerprint an answer carries, so it refuses
-  that handshake whatever the pin says; the mode is there to show it.
+  instead. That says nothing about the camera either, so the client treats
+  it like the empty shape and the pin decides.
 - ICE candidates trickle. The client's offer carries none (only
   end-of-candidates) and its candidates follow as ``iceCandidateReq``; the
   camera's own ride in its ``webrtcResp`` answer.

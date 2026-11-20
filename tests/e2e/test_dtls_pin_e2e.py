@@ -16,11 +16,12 @@ What they guard, through a ``MemoryDtlsPinStore``:
    from the open, ``dtls_pin_mismatch`` in stream health, the pin untouched -
    and ``forget_dtls_pin()`` lets the camera's new certificate be learned;
 4. a camera with a new certificate every session is never locked out: it
-   keeps learning and ``changes`` counts up.
+   keeps learning and ``changes`` counts up;
+5. an answer that echoes the client's own fingerprint is treated like the
+   empty one: the pin decides.
 
-A refused handshake does not fail the open at once: the client waits out its
-ICE budget (the connection stays "connecting"), so the refused opens here are
-given a short timeout.
+A refused handshake fails the open at once, not at the end of the ICE budget,
+so the refused opens here run with the normal timeouts and are timed.
 """
 
 import asyncio
@@ -37,8 +38,8 @@ pytestmark = [pytest.mark.e2e, pytest.mark.timeout(60)]
 
 #: An open that connects does so in well under a second on loopback.
 OPEN_TIMEOUT_S = 10.0
-#: An open whose handshake is refused runs this long (see the docstring).
-REFUSED_OPEN_TIMEOUT_S = 4.0
+#: A refused open ends this soon; the ICE budget it no longer waits out is 30 s.
+REFUSED_OPEN_MAX_S = 5.0
 
 
 @pytest.fixture
@@ -128,26 +129,21 @@ async def test_new_certificate_after_enforcement_is_refused(dtls_camera):
     await cam.reboot(new_certificate=True)
     assert cam.fingerprint != pinned["fingerprint"]
 
+    started = time.monotonic()
     with pytest.raises(AidotDtlsPinMismatch):
-        await dc.async_open_webrtc_stream(timeout=REFUSED_OPEN_TIMEOUT_S)
+        await dc.async_open_webrtc_stream()
+    elapsed = time.monotonic() - started
+    assert elapsed < REFUSED_OPEN_MAX_S, f"the refused open took {elapsed:.1f} s"
     # Refused on a real handshake that presented the new certificate...
     assert cam.sessions[-1] == cam.fingerprint
     # ...and whoever presented it did not get to replace the pin.
     assert dc.dtls_pin == pinned
 
-    # The background stream names the refusal in its health. The streaming
-    # loop opens with the default 30 s budget; a refused open lasts all of it,
-    # so it is shortened here - the open path itself is unchanged.
-    real_open = dc.async_open_webrtc_stream
-
-    async def _short_open(*args, **kwargs):
-        kwargs["timeout"] = REFUSED_OPEN_TIMEOUT_S
-        return await real_open(*args, **kwargs)
-
-    dc.async_open_webrtc_stream = _short_open
+    # The background stream, on its default open budget, names the refusal
+    # in its health.
     await dc.async_start_streaming()
     try:
-        deadline = time.monotonic() + 3 * REFUSED_OPEN_TIMEOUT_S
+        deadline = time.monotonic() + 3 * REFUSED_OPEN_MAX_S
         while (
             dc.stream_health.last_end_reason != sh.END_DTLS_PIN_MISMATCH
             and time.monotonic() < deadline
@@ -158,7 +154,6 @@ async def test_new_certificate_after_enforcement_is_refused(dtls_camera):
         )
     finally:
         await dc.async_stop_streaming()
-        del dc.async_open_webrtc_stream
     assert dc.dtls_pin == pinned
 
     # The owner says the camera was reset: its new certificate is learned.
@@ -187,3 +182,30 @@ async def test_new_certificate_every_session_is_never_locked_out(dtls_camera):
             "changes": n,
         }
     assert len(set(cam.sessions)) == opens
+
+
+async def test_an_echoed_fingerprint_leaves_the_decision_to_the_pin(
+    e2e_device_client, fake_broker
+):
+    dc = e2e_device_client("A000088")
+    dc.dtls_pin_store = MemoryDtlsPinStore()
+    cam = FakeDtlsCamera(
+        fake_broker.url,
+        device_id=dc.device_id,
+        user_id=dc.user_id,
+        fingerprint_mode="echo",
+    )
+    await cam.start()
+    try:
+        # The echo says nothing about the camera, so it is learned...
+        pinned = await _enforce(dc, cam)
+        await _open(dc)
+        assert dc.dtls_pin == pinned
+
+        # ...and a new certificate behind the same echo is still refused.
+        await cam.reboot(new_certificate=True)
+        with pytest.raises(AidotDtlsPinMismatch):
+            await dc.async_open_webrtc_stream()
+        assert dc.dtls_pin == pinned
+    finally:
+        await cam.aclose()
