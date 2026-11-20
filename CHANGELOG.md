@@ -4,6 +4,17 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [Unreleased]
+
+### Documentation
+- **`async_sleep_camera()` does not make a battery camera sleep sooner.** Its
+  docstring said it sent the camera "back to sleep now". Measured on three
+  A001513 cameras against the camera's own `sleepStatus` report, the camera
+  sleeps about 28 s after its last keep-alive renewal whether the sleep is sent
+  or not, and no variant of the request (other body, other API host, MQTT,
+  `setKeepAliveTime` 0) changes that. The method is unchanged; its docstring and
+  docs/CAMERAS.md now say what it does.
+
 ## [1.5.0]
 
 DTLS cameras (the A000088 / M3 Pro) now have their certificate checked: each
