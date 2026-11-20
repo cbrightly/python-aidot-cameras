@@ -3787,16 +3787,26 @@ class CameraMixin(
             await asyncio.sleep(min(10.0, max(0.0, end - loop.time())))
 
     async def async_sleep_camera(self, retries: int = 2) -> bool:
-        """Send a battery camera back to sleep now, instead of ~25 s after its
-        last keep-alive.
+        """Ask the cloud to put a battery camera to sleep - which, as measured,
+        does not make it sleep any sooner.
 
         The same cloud endpoint as :meth:`async_wake_camera` with
-        ``status: "sleep"``: the app sends it when the user leaves a battery
-        camera's live view. Useful after a scheduled recording, when nobody
-        will watch again soon. A camera that is streaming to someone keeps
-        its session until that ends; this only stops the camera waiting up for
-        a viewer that is not coming. Non-battery cameras never sleep, so this
-        is a no-op for them.
+        ``status: "sleep"``, the request the app sends when the user leaves a
+        battery camera's live view. The cloud accepts it (HTTP 200), but on an
+        A001513 the camera still sleeps when its keep-alive window runs out,
+        exactly as if nothing had been sent. Measured 2026-11-20 on three
+        A001513 cameras against the camera's own ``sleepStatus`` report: about
+        28 s after the last ``setKeepAliveTime`` renewal whether this was sent
+        or not. Nor did the variants: the web app's body (``{"status"}`` only),
+        the same request on the v32 API host, the MQTT
+        ``lowPowerActiveStateReq`` in either envelope (its
+        ``lowPowerActiveStateResp`` comes from the cloud, not the camera), all
+        of them at once, or ``setKeepAliveTime`` with 0.
+
+        Kept for app parity and in case another model or firmware honours it.
+        To spend less battery, wake a battery camera less often; nothing sent
+        here shortens a wake. Returns True if the cloud accepted the request.
+        A no-op (True) on non-battery cameras, which never sleep.
         """
         return await self._async_low_power("sleep", retries)
 

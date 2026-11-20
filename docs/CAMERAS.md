@@ -525,6 +525,17 @@ the HTTP wake is forwarded by the cloud to the camera's always-on channel, so it
 reaches a deeply-sleeping camera that has dropped its MQTT session (matching the
 app, which sends both). Validated on three A001513 cameras (woken with no motion).
 
+There is no way to send one back to sleep sooner. `async_sleep_camera()` posts
+the same endpoint with `status: "sleep"`, as the app does on leaving a live view,
+and the cloud accepts it, but the camera ignores it: measured on three A001513
+cameras (2026-11-20), each reported its own `sleepStatus` over MQTT about 28 s
+after the last `setKeepAliveTime` renewal whether a sleep was sent or not. The
+same held for every variant tried - the web app's `{"status"}`-only body, the
+v32 API host, the MQTT `lowPowerActiveStateReq` (whose
+`lowPowerActiveStateResp` comes from the cloud, not the camera), all of them at
+once, and `setKeepAliveTime` with 0. The battery cost of a view is therefore set
+by the wake, not by how the view ends: wake a battery camera only when needed.
+
 ## Two-way audio (push-to-talk)
 
 Two-way audio works on **both** camera paths through the same API. Open with
