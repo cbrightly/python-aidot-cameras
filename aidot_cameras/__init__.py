@@ -20,6 +20,7 @@ from .settings import StreamSettings
 # not drag in av or aiortc, so a plain (non-[webrtc]) install still imports.
 from .camera.models import CameraDeviceInformation, CameraStatusData
 from .camera.sdes import SdesSession
+from .camera.dtls_pins import DtlsPinStore, MemoryDtlsPinStore
 from .camera.stream_health import StreamHealth
 from .camera.webrtc import WebRTCSession
 from .discover import CameraDiscover, Discover
@@ -30,6 +31,7 @@ from .exceptions import (
     AidotCameraNoMedia,
     AidotCameraNotReady,
     AidotCameraWrongCodec,
+    AidotDtlsPinMismatch,
     AidotError,
     AidotFfmpegMissing,
     AidotIceNotEstablished,
@@ -172,6 +174,7 @@ __all__ = [
     "AidotCameraNotReady",
     "AidotCameraWrongCodec",
     "AidotClient",
+    "AidotDtlsPinMismatch",
     "AidotError",
     "AidotFfmpegMissing",
     "AidotIceNotEstablished",
@@ -196,9 +199,11 @@ __all__ = [
     "DeviceInformation",
     "DeviceStatusData",
     "Discover",
+    "DtlsPinStore",
     "HTTPError",
     "InvalidHost",
     "InvalidURL",
+    "MemoryDtlsPinStore",
     "RtspPublishError",
     "SdesSession",
     "StreamHealth",

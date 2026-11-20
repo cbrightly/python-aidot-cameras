@@ -424,16 +424,46 @@ when one is left permissive. `AIDOT_ALLOW_PLAINTEXT_MQTT` and
 | `AIDOT_EXTRA_REGIONS` | Comma-separated account regions to accept beyond `us`, `eu` and `jp`; an unknown region is refused with `AidotUnknownRegion`. Each entry must be a hostname label. | unset |
 | `AIDOT_ALLOW_LAN_SERVE` | Silence the warning when decrypted media is served on a non-loopback bind (e.g. `0.0.0.0`), where any LAN host can read it. | unset (warn) |
 | `AIDOT_CRED_KEY_FILE` | Fernet key file for stored credentials; point it outside the config dir. Default credentials path only (ignored with an explicit `creds_path`). | `$XDG_CONFIG_HOME/aidot/.key` (else `~/.config/aidot/.key`) |
-| `AIDOT_DTLS_PINNED_FP` | Pin DTLS cameras' certificate to this `sha-256` fingerprint (case and `:` ignored). Set, any other certificate, or none, fails the handshake. | unset (not independently verified; warns) |
+| `AIDOT_DTLS_PINNED_FP` | Pin every DTLS camera's certificate to this one `sha-256` fingerprint (case and `:` ignored). Set, any other certificate, or none, fails the handshake. Wins over the per-camera pins below. | unset (per-camera pins) |
+| `AIDOT_DTLS_PIN_LEARN` | Learn each DTLS camera's certificate and pin it (see below). `0` turns learning off: certificates are then accepted unverified, with a warning, unless `AIDOT_DTLS_PINNED_FP` is set. | `1` (on) |
 | `AIDOT_SDES_HOLEPUNCH_HOST` | NAT hole-punch target when the cloud supplies no TURN entry. Unset uses a hardcoded vendor TURN host; empty disables that fallback. | unset (vendor host + warn) |
 
-**Without `AIDOT_DTLS_PINNED_FP`, a DTLS camera's (A000088's) certificate is
-not independently verified.** The camera echoes our own fingerprint back, or
-sends an empty one, in which case whatever it presents is accepted with a
-warning; a fingerprint it does send arrives over the same cloud signaling. The
-media is encrypted but not authenticated against something standing in for the
-camera. With a pin, every DTLS open checks the presented certificate and fails
-closed, logging the fingerprint on a mismatch. The pin applies to every DTLS
-camera the process opens, so it suits a one-camera process (the CLI) or
-cameras that share a certificate. SDES cameras key their media through
-signaling and have no certificate to check.
+**A DTLS camera's (A000088's) certificate cannot be checked against signaling.**
+The camera echoes our own fingerprint back, or sends an empty one, and any
+fingerprint it does send arrives over the same cloud signaling. So the library
+pins each camera's certificate on first use instead:
+
+- The first certificate a camera presents is recorded. Once the same
+  certificate has been presented on 3 handshakes in a row, it is pinned, and
+  from then on any other certificate, or none, fails the handshake: the open
+  raises `AidotDtlsPinMismatch` and `stream_health.last_end_reason` reads
+  `dtls_pin_mismatch`. The log names the camera and the first 8 hex digits of
+  each fingerprint.
+- A certificate that changes before it is pinned replaces the recorded one and
+  learning starts again, so a camera that makes a new certificate for every
+  session is never locked out; it streams unverified, as before, with one
+  warning.
+- After a camera is reset or replaced, call
+  `CameraDeviceClient.forget_dtls_pin()` and its next open learns the new
+  certificate. `CameraDeviceClient.dtls_pin` shows the current record.
+- Pins live in the client's `dtls_pin_store`. By default that is in memory and
+  lasts as long as the `CameraClient`; pass
+  `CameraClient(..., dtls_pin_store=...)` to keep them across restarts (see
+  below).
+
+Until a camera's pin is learned, and on a camera whose certificate keeps
+changing, its media is encrypted but not authenticated against something
+standing in for the camera. `AIDOT_DTLS_PINNED_FP` checks every DTLS camera
+against one fingerprint from the first open, so it suits a one-camera process
+(the CLI) or cameras that share a certificate. SDES cameras key their media
+through signaling and have no certificate to check.
+
+A pin store is any object with three synchronous methods, called from inside
+the handshake: `get(device_id)` returns the record last stored for that
+camera or `None`, `set(device_id, record)` stores one, and `delete(device_id)`
+drops it. A record is a small JSON-safe dict; store it as it comes. A host
+with asynchronous storage keeps the records in memory and schedules its own
+save from `set` and `delete`. `MemoryDtlsPinStore(records)` is the default
+and can be seeded with records saved earlier; its `as_dict()` returns them
+all. A store that fails to read or write is logged and treated as empty, so a
+storage error never stops a stream.

@@ -158,6 +158,18 @@ class AidotIceNotEstablished(AidotNegotiationFailed):
     """
 
 
+class AidotDtlsPinMismatch(AidotNegotiationFailed):
+    """A DTLS camera presented a certificate other than its pinned one.
+
+    The pin is ``AIDOT_DTLS_PINNED_FP`` or the camera's learned pin (see
+    ``CameraClient(dtls_pin_store=...)``). The handshake was refused, so no
+    media flowed. Either someone on the network path is answering for the
+    camera, or the camera itself changed certificate (a reset or a
+    replacement): once that is known, ``CameraDeviceClient.forget_dtls_pin()``
+    lets the next open learn the new one. Retrying without that refuses again.
+    """
+
+
 class AidotFfmpegMissing(AidotStreamOpenError):
     """ffmpeg is needed for this stream and is not installed."""
 

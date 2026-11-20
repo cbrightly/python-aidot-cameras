@@ -241,6 +241,7 @@ class CameraDeviceClient(CameraMixin, LanRetryMixin, _UpstreamDeviceClient):
         login_info: Optional[dict] = None,
         client: Any = None,
         stream_settings: Optional[StreamSettings] = None,
+        dtls_pin_store: Any = None,
     ) -> None:
         """Build the upstream client, then initialize camera state.
 
@@ -260,6 +261,9 @@ class CameraDeviceClient(CameraMixin, LanRetryMixin, _UpstreamDeviceClient):
 
         `stream_settings` is the account client's `StreamSettings`; every
         camera-side read of those knobs goes through it (see `settings.read`).
+
+        `dtls_pin_store` is the account client's `DtlsPinStore`, where this
+        camera's learned DTLS certificate pin is kept (camera/dtls_pins.py).
         """
         # Real cameras report `aesKey: [None]` - a truthy list holding None.
         # Normalize OUR typed copy to None; upstream reads the raw dict, whose
@@ -285,6 +289,7 @@ class CameraDeviceClient(CameraMixin, LanRetryMixin, _UpstreamDeviceClient):
         self._device_model = device
         self._user_info_model = user_info
         self.stream_settings = stream_settings
+        self.dtls_pin_store = dtls_pin_store
 
         raw_dev = _raw_device
         # `user_info` is normally the raw account dict itself; only fall back
