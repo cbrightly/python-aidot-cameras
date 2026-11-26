@@ -6,6 +6,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **A brief DNS or connect failure at stream open no longer logs an ERROR.**
+  `_async_get_mqtt_url` logged every failure at ERROR, including the transient
+  network errors the motion poll already treats as routine. On 2026-11-26 the
+  box briefly could not resolve the vendor cloud host while four cameras were
+  opening, and four ERROR lines paged the soak watcher; the serve loop retries
+  a failed open anyway. A transient failure is now a WARNING and escalates to
+  ERROR once a run of them outlasts 60 s; any other failure is still an ERROR
+  at once. The line keeps its prefix and still names the exception type.
+
 ### Documentation
 - **`async_sleep_camera()` does not make a battery camera sleep sooner.** Its
   docstring said it sent the camera "back to sleep now". Measured on three

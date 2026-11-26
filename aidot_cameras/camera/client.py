@@ -162,6 +162,12 @@ def _is_transient_cloud_error(exc: BaseException) -> bool:
     return isinstance(exc, tuple(transient))
 
 
+#: How long _async_get_mqtt_url may keep failing transiently (DNS, connect,
+#: timeout) before its log escalates from WARNING to ERROR. A box-side DNS blip
+#: clears in seconds; a minute of it is an outage worth an ERROR.
+_MQTT_URL_TRANSIENT_GRACE_S = 60.0
+
+
 # Offline keepalive pause (see CameraMixin._backoff_or_offline_pause): while the
 # cloud explicitly reports a device offline, failed-open retries re-check the
 # flag every RECHECK seconds and only probe a real open every PROBE seconds,
@@ -3913,15 +3919,46 @@ class CameraMixin(
             if data.get("ip") and isinstance(_raw_ref, dict) and "ip" not in _raw_ref:
                 _raw_ref["ip"] = data["ip"]
 
+            self._mqtt_url_fail_since = None
             return self._mqtt_url
 
         except Exception as exc:
-            _LOGGER.error("_async_get_mqtt_url failed: %r", exc)
+            # A DNS or connect blip on the box fails this one open, and the
+            # serve loop retries it on its own pacing; that is a WARNING. Only
+            # a run of transient failures that outlasts
+            # _MQTT_URL_TRANSIENT_GRACE_S, or any failure not known to be
+            # transient, is an ERROR. Measured 2026-11-26: four cameras opened
+            # inside 8 s while the box briefly could not resolve the cloud
+            # host, and four ERROR lines paged the soak watcher. Same prefix at
+            # either level, so one grep finds every occurrence.
+            now = time.monotonic()
+            since = getattr(self, "_mqtt_url_fail_since", None)
+            if since is None:
+                since = self._mqtt_url_fail_since = now
+            if (
+                _is_transient_cloud_error(exc)
+                and now - since < _MQTT_URL_TRANSIENT_GRACE_S
+            ):
+                _LOGGER.warning(
+                    "_async_get_mqtt_url failed: %r (transient, failing for"
+                    " %.0f s; the open is retried)",
+                    exc,
+                    now - since,
+                )
+            else:
+                _LOGGER.error(
+                    "_async_get_mqtt_url failed: %r (failing for %.0f s)",
+                    exc,
+                    now - since,
+                )
             # The mqttConfig2 broker stands on its own when only
             # getServerUrlConfig failed; when that lookup is what failed,
             # _cfg2_url is its exception, not a URL.
             if isinstance(_cfg2_url, str) and _cfg2_url:
-                return self._accept_mqtt_url(_cfg2_url, "mqttConfig2")
+                accepted = self._accept_mqtt_url(_cfg2_url, "mqttConfig2")
+                if accepted:
+                    self._mqtt_url_fail_since = None
+                return accepted
             return None
 
     def _accept_mqtt_url(self, url: str, source: str) -> Optional[str]:
