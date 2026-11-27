@@ -346,27 +346,38 @@ jobs:
       - name: Resolve and install against HA's constraints
         run: |
           set -euo pipefail
-          # --retry: raw.githubusercontent.com 429s shared runners at times (it
-          # failed this job on 2026-11-17). A 404 is not retried, so a missing
-          # manifest below still falls through to the warning.
+          # raw.githubusercontent.com 429s shared runners at times (it failed
+          # this job on 2026-11-17), so retry for about a minute, and cap each
+          # try so a stalled transfer can't hold the runner. A 404 is not
+          # retried. Prints the HTTP status (000 when no response came back).
           fetch() {
-            curl -fsSL --retry 5 -o "$1" \
+            curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused \
+              --connect-timeout 10 --max-time 60 -w '%{http_code}' -o "$1" \
               "https://raw.githubusercontent.com/home-assistant/core/${{ matrix.ha }}/homeassistant/$2"
           }
-          fetch ha-constraints.txt package_constraints.txt
+          fetch ha-constraints.txt package_constraints.txt > /dev/null
           # Core pins python-aidot in its own aidot integration's manifest, NOT
           # in package_constraints.txt, so without this step the job never saw
           # that pin at all. Add it, so this job checks the combination a Home
-          # Assistant install actually resolves.
-          if fetch aidot-manifest.json components/aidot/manifest.json; then
-            python - >> ha-constraints.txt <<'PY'
+          # Assistant install actually resolves. Only a 404 means there is no
+          # manifest; any other failure must not quietly drop the pin.
+          status=$(fetch aidot-manifest.json components/aidot/manifest.json) || true
+          case "$status" in
+            200)
+              python - >> ha-constraints.txt <<'PY'
           import json
           for req in json.load(open("aidot-manifest.json"))["requirements"]:
               print(req)
           PY
-          else
-            echo "::warning::no aidot manifest in HA core ${{ matrix.ha }}; python-aidot is unconstrained in this run"
-          fi
+              ;;
+            404)
+              echo "::warning::no aidot manifest in HA core ${{ matrix.ha }}; python-aidot is unconstrained in this run"
+              ;;
+            *)
+              echo "::error::could not fetch the aidot manifest from HA core ${{ matrix.ha }} (HTTP ${status})"
+              exit 1
+              ;;
+          esac
           echo "--- constraints that matter to us ---"
           grep -Ei '^(av|numpy|pillow|cryptography|aiohttp|python-aidot)==' ha-constraints.txt || true
           pip install -e ".[webrtc]" -c ha-constraints.txt
