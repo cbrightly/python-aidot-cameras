@@ -346,14 +346,19 @@ jobs:
       - name: Resolve and install against HA's constraints
         run: |
           set -euo pipefail
-          curl -fsSL -o ha-constraints.txt \
-            "https://raw.githubusercontent.com/home-assistant/core/${{ matrix.ha }}/homeassistant/package_constraints.txt"
+          # --retry: raw.githubusercontent.com 429s shared runners at times (it
+          # failed this job on 2026-11-17). A 404 is not retried, so a missing
+          # manifest below still falls through to the warning.
+          fetch() {
+            curl -fsSL --retry 5 -o "$1" \
+              "https://raw.githubusercontent.com/home-assistant/core/${{ matrix.ha }}/homeassistant/$2"
+          }
+          fetch ha-constraints.txt package_constraints.txt
           # Core pins python-aidot in its own aidot integration's manifest, NOT
           # in package_constraints.txt, so without this step the job never saw
           # that pin at all. Add it, so this job checks the combination a Home
           # Assistant install actually resolves.
-          if curl -fsSL -o aidot-manifest.json \
-              "https://raw.githubusercontent.com/home-assistant/core/${{ matrix.ha }}/homeassistant/components/aidot/manifest.json"; then
+          if fetch aidot-manifest.json components/aidot/manifest.json; then
             python - >> ha-constraints.txt <<'PY'
           import json
           for req in json.load(open("aidot-manifest.json"))["requirements"]:
